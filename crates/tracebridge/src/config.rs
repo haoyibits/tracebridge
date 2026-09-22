@@ -445,7 +445,6 @@ impl Config {
     }
 
     /// Create the run directory (with a .gitignore that ignores everything).
-    #[allow(dead_code)] // used from phase 3 on
     pub fn ensure_run_dir(&self) -> Result<()> {
         std::fs::create_dir_all(&self.run_dir)
             .map_err(|error| bridge_error!("cannot create {}: {error}", self.run_dir.display()))?;

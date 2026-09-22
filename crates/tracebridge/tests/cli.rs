@@ -7,9 +7,9 @@ fn tracebridge(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tracebridge"))
         .args(args)
         .current_dir(dir)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", dir)
-        .env_remove("T32_SYS")
-        .env_remove("T32SYS")
         .output()
         .unwrap()
 }

@@ -1,0 +1,38 @@
+; ------------------------------------------------------------------------------
+; Two extra toolbar buttons that run tracebridge flash and load, so the same
+; flows are reachable from PowerView itself. The stock TRACE32 menu and toolbar
+; are left untouched. tracebridge writes this file into <project>/.tracebridge/
+; and runs it with the absolute paths of its executable and trace32.toml.
+; ------------------------------------------------------------------------------
+
+PRIVATE &exe &config
+ENTRY &exe &config
+&exe=STRing.TRIM("&exe")
+&config=STRing.TRIM("&config")
+
+IF "&exe"==""
+(
+  PRINT %ERROR "tracebridge: toolbar.cmm needs the tracebridge executable path"
+  ENDDO
+)
+
+IF "&config"==""
+(
+  PRINT %ERROR "tracebridge: toolbar.cmm needs the trace32.toml path"
+  ENDDO
+)
+
+MENU.ReProgram
+(
+  ADD
+  TOOLBAR
+  (
+    SEPARATOR
+    ; The trailing '&' makes the host process asynchronous. PowerView must
+    ; return to its event loop before tracebridge connects back through RCL.
+    TOOLITEM "Flash"    ":FLASH" "OS.Command ""&exe"" --config ""&config"" flash &"
+    TOOLITEM "Load ELF" ":LOAD"  "OS.Command ""&exe"" --config ""&config"" load &"
+  )
+)
+
+ENDDO

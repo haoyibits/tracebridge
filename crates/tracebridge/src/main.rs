@@ -4,8 +4,11 @@
 mod config;
 mod errors;
 mod init;
+mod powerview;
 mod pycompat;
+mod remote;
 mod t32config;
+mod target;
 mod ui;
 
 use std::path::{Path, PathBuf};
@@ -14,6 +17,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config::{Config, find_config_file, load_config};
 use crate::errors::Result;
+use crate::target::Action;
 use crate::ui::info;
 
 const VERSION: &str = concat!(
@@ -118,9 +122,38 @@ fn run(cli: Cli) -> Result<i32> {
     match cli.command {
         Command::Init => unreachable!(),
         Command::Config => print_config(&config),
+        Command::Open => open(&config, None)?,
+        Command::Flash => open(&config, Some(Action::Flash))?,
+        Command::Load => open(&config, Some(Action::Load))?,
         other => bail!("{} is not implemented yet", command_name(&other)),
     }
     Ok(0)
+}
+
+/// `open`, `flash` and `load` (`_run` in cli.py).
+fn open(config: &Config, action: Option<Action>) -> Result<()> {
+    if powerview::start_powerview(config)? {
+        info("PowerView ready");
+    } else {
+        info(&format!(
+            "reusing PowerView on RCL port {}",
+            config.rcl_port
+        ));
+    }
+    let Some(action) = action else {
+        return Ok(());
+    };
+    let verb = match action {
+        Action::Flash => "flashing",
+        Action::Load => "loading symbols from",
+    };
+    info(&format!("{verb} {}", config.elf.display()));
+    target::run_target(config, action)?;
+    info(match action {
+        Action::Flash => "flashed, symbols loaded, target running",
+        Action::Load => "symbols loaded, target running",
+    });
+    Ok(())
 }
 
 fn command_name(command: &Command) -> &'static str {
