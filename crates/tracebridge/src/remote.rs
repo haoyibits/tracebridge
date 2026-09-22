@@ -50,7 +50,6 @@ pub fn connect_debugger(config: &Config, timeout: Duration) -> Result<Debugger> 
 }
 
 /// `reset_and_stop`: break and reset the target into `SYStem.Mode Up`.
-#[allow(dead_code)] // used by the DAP proxy (phase 4)
 pub fn reset_and_stop(config: &Config) -> Result<()> {
     let mut debugger = connect_debugger(config, CONNECT_TIMEOUT)?;
     reset_and_stop_with(&mut debugger)

@@ -2,6 +2,7 @@
 //! RustRover (cli.py and t32.py of the Python tool).
 
 mod config;
+mod dap;
 mod errors;
 mod init;
 mod powerview;
@@ -125,9 +126,32 @@ fn run(cli: Cli) -> Result<i32> {
         Command::Open => open(&config, None)?,
         Command::Flash => open(&config, Some(Action::Flash))?,
         Command::Load => open(&config, Some(Action::Load))?,
+        Command::Adapter => adapter(&config)?,
         other => bail!("{} is not implemented yet", command_name(&other)),
     }
     Ok(0)
+}
+
+/// `adapter` (`_run` in cli.py): the IDE starts it before attaching.
+fn adapter(config: &Config) -> Result<()> {
+    if powerview::port_open(config.dap_port) {
+        info(&format!(
+            "debug adapter already listening on {}",
+            config.dap_port
+        ));
+        return Ok(());
+    }
+    if !powerview::port_open(config.rcl_port) {
+        bail!(
+            "no PowerView on RCL port {}; run 'tracebridge open', 'flash' or 'load' first",
+            config.rcl_port
+        );
+    }
+    info(&format!(
+        "starting debug adapter proxy on port {}",
+        config.dap_port
+    ));
+    dap::proxy::run_proxy(config)
 }
 
 /// `open`, `flash` and `load` (`_run` in cli.py).
