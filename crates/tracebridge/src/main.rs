@@ -215,9 +215,16 @@ fn open(config: &Config, action: Option<Action>, env: &pycompat::Env) -> Result<
         Action::Flash => "flashing",
         Action::Load => "loading symbols from",
     };
+    let mut config = config.clone();
     if let Some(choice) = &choice {
         info(&format!("flash script {}", describe(choice)));
+        // Family scripts need the derivative; without CPU= they use a default one.
+        if let Some(argument) = choice.cpu_argument(&config.flash_args) {
+            info(&format!("passing {argument} to the flash script"));
+            config.flash_args.push(argument);
+        }
     }
+    let config = &config;
     info(&format!("{verb} {}", config.elf.display()));
     target::run_target(
         config,

@@ -256,6 +256,7 @@ id 回绕：… fe → 00 → 01
   - 候选条件：脚本头的 `@Chip:` 能匹配芯片名，并且支持 PREPAREONLY。
   - 优先级依次为：库 > 安装目录；精确名字 > 通配符；字面部分长 > 字面部分短；片内 Flash 脚本 > `<family>-<memory>` 变体。仍然平局就报错。
   - 相关命令：`tracebridge chips <name>`、`flash --chip/--script`。实现在 `flash.rs`。
+  - 按芯片名选中的脚本如果支持 `CPU=`（脚本文本里有 `"CPU="`），且 `flash.args` 里没写 `CPU=`，就自动追加 `CPU=<chip>`。原因：官方脚本按系列编写，不传 `CPU=` 会退回默认型号（例如 stm32f4xx.cmm 默认 STM32F405ZG）。
   - 用户的 SR6P6 脚本是从 Lauterbach FAE 那里拿到的（官方发布里没有），许可证是 "TRACE32 only"。它已复制到 `~/.config/tracebridge/flash/sr6p6.cmm`，**不得提交进仓库**。
 - **工作方式**：用户 2026-09-22 指示"决定好后直接开始项目，最后告诉我使用方法"。因此各阶段连续推进，每阶段照样执行 fmt、clippy、test 并提交，全部完成后统一汇报，附使用方法和手动验证清单。
 

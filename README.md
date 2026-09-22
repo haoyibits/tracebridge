@@ -155,6 +155,11 @@ shorter one; the internal-flash script (`stm32f4xx.cmm`) beats memory variants
 (`stm32f4xx-qspi.cmm`, `-spi`, `-emmc`, `-optionbyte`, ...). Remaining ties
 are reported; set `flash.script` then.
 
+Use the full part number (as for `SYStem.CPU`, e.g. `STM32F407VG`). TRACE32's
+scripts cover a whole family and take the derivative as `CPU=<name>`; without
+it they fall back to a default derivative. When the chosen script accepts
+`CPU=` and `flash.args` does not set it, tracebridge passes `CPU=<chip>`.
+
 ```sh
 tracebridge chips STM32H743ZI        # which script, and related ones
 tracebridge flash --chip SR6P6       # one-off override

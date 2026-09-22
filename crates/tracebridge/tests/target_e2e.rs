@@ -124,7 +124,7 @@ fn flash_script_is_chosen_by_chip_from_the_library() {
     std::fs::create_dir_all(&library).unwrap();
     std::fs::write(
         library.join("board.cmm"),
-        "; @Chip: MYCHIP*\n; DO board [PREPAREONLY]\n",
+        "; @Chip: MYCHIP*\n; DO board [PREPAREONLY] [CPU=<cpu>]\n&c=STRing.SCANAndExtract(\"&p\",\"CPU=\",\"\")\n",
     )
     .unwrap();
     let output = project.run(&["flash", "--chip", "MYCHIP-A"]);
@@ -137,7 +137,7 @@ fn flash_script_is_chosen_by_chip_from_the_library() {
     assert_eq!(
         rcl.state().log[1],
         format!(
-            "cmd DO \"{}\" PREPAREONLY",
+            "cmd DO \"{}\" PREPAREONLY CPU=MYCHIP-A",
             library.join("board.cmm").display()
         )
     );

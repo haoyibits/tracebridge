@@ -46,6 +46,9 @@ pub struct Script {
     pub source: Source,
     pub chips: Vec<String>,
     pub prepare_only: bool,
+    /// The script takes the derivative as `CPU=<name>` (Lauterbach's family
+    /// scripts do; without it they fall back to a default derivative).
+    pub accepts_cpu: bool,
 }
 
 /// How the flash script was chosen.
@@ -62,6 +65,22 @@ pub enum Choice {
 }
 
 impl Choice {
+    /// `CPU=<chip>` to add to the script arguments: the script was chosen by
+    /// chip, takes `CPU=`, and `args` do not set it already.
+    pub fn cpu_argument(&self, args: &[String]) -> Option<String> {
+        match self {
+            Choice::Chip { chip, script, .. }
+                if script.accepts_cpu
+                    && !args
+                        .iter()
+                        .any(|arg| arg.to_ascii_uppercase().starts_with("CPU=")) =>
+            {
+                Some(format!("CPU={chip}"))
+            }
+            _ => None,
+        }
+    }
+
     /// The script as passed to `DO`.
     pub fn script(&self) -> String {
         match self {
@@ -129,12 +148,13 @@ pub fn read_script(path: &Path, source: Source) -> Option<Script> {
             );
         }
     }
-    let prepare_only = text.to_ascii_uppercase().contains("PREPAREONLY");
+    let upper = text.to_ascii_uppercase();
     Some(Script {
         path: path.to_path_buf(),
         source,
         chips,
-        prepare_only,
+        prepare_only: upper.contains("PREPAREONLY"),
+        accepts_cpu: upper.contains("\"CPU=\""),
     })
 }
 
@@ -311,6 +331,7 @@ mod tests {
             source,
             chips: chips.iter().map(|c| c.to_string()).collect(),
             prepare_only,
+            accepts_cpu: true,
         }
     }
 
@@ -393,12 +414,14 @@ mod tests {
         std::fs::write(
             &path,
             "; @Title: x\n; @Chip: STM32H7S* STM32H7R*\n;@Chip: STM32H750VB\nENTRY %LINE &p\n\
-             &p=STRing.SCAN(\"&p\",\"PREPAREONLY\",0)\n",
+             &p=STRing.SCAN(\"&p\",\"PREPAREONLY\",0)\n\
+             &c=STRing.SCANAndExtract(\"&p\",\"CPU=\",\"\")\n",
         )
         .unwrap();
         let script = read_script(&path, Source::Library).unwrap();
         assert_eq!(script.chips, ["STM32H7S*", "STM32H7R*", "STM32H750VB"]);
         assert!(script.prepare_only);
+        assert!(script.accepts_cpu);
     }
 
     fn config_with(dir: &Path) -> (Config, Env) {
@@ -474,6 +497,25 @@ mod tests {
                 .0
                 .starts_with("no flash script:")
         );
+    }
+
+    #[test]
+    fn cpu_argument_is_added_only_when_useful() {
+        let chosen = |accepts_cpu| Choice::Chip {
+            chip: "STM32F407VG".into(),
+            pattern: "STM32F4*".into(),
+            script: Script {
+                accepts_cpu,
+                ..script("stm32f4xx", Source::Trace32, &["STM32F4*"], true)
+            },
+        };
+        assert_eq!(
+            chosen(true).cpu_argument(&["DUALPORT=1".into()]),
+            Some("CPU=STM32F407VG".into())
+        );
+        assert_eq!(chosen(true).cpu_argument(&["cpu=STM32F405RG".into()]), None);
+        assert_eq!(chosen(false).cpu_argument(&[]), None);
+        assert_eq!(Choice::Explicit("x.cmm".into()).cpu_argument(&[]), None);
     }
 
     #[test]
