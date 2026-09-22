@@ -281,6 +281,8 @@ id 回绕：… fe → 00 → 01
 **Homebrew**：通过自己的 tap `haoyibits/homebrew-tap` 发布（`brew install haoyibits/tap/tracebridge`），暂不提交 homebrew-core。
 - tap 仓库的 `Update formulae` workflow 每小时整点后 17 分运行一次，也可以手动触发。它用自带的 GITHUB_TOKEN 读取 tracebridge 的最新 release，下载各平台的 `.sha256`，再从对应 tag 下载 `packaging/homebrew/formula.sh` 生成 formula 并提交。整个流程不需要跨仓库的 PAT。
 - 注意：公开仓库连续 60 天没有活动，GitHub 会停用定时 workflow。发布新版本后如果 formula 没更新，到 tap 仓库的 Actions 页面手动运行一次即可。
+- **bottle**：release 任务调用 `packaging/homebrew/bottles.sh`，把 4 个发布包重新打成 bottle（`tracebridge-<ver>.<tag>.bottle.tar.gz`，内部是 `tracebridge/<ver>/bin/tracebridge`，不重新编译）。平台标签是 arm64_sonoma、sonoma、arm64_linux、x86_64_linux，macOS 用 release runner 的版本；一个 bottle 同时适用于该版本及之后的所有 macOS 版本。formula 里的 `bottle do` 段以 release 页面为 root_url。Homebrew 从非 GitHub Packages 的 root_url 下载时，文件名只用单个 `-`（见 Homebrew 的 bottle.rb 中 `Filename#url_encode`）。
+- **为什么要 bottle**：没有 bottle 时，Homebrew 会把安装当成从源码构建，要求 Command Line Tools 是最新版本（2026-09-22 在 macOS 27 + CLT 26 上实际遇到过）。有了 bottle 就直接解包安装，不需要 CLT。
 - Release 开始时会检查 tag 与 Cargo.toml 的版本号是否一致。
 
 ### 手动验证清单（需要真实 PowerView/硬件，均未验证）

@@ -4,7 +4,9 @@
 #   packaging/homebrew/formula.sh <version> <dist dir> [owner/repo] > tracebridge.rb
 #
 # <dist dir> holds the release archives' .sha256 files
-# (tracebridge-<target>.tar.gz.sha256). The Update formulae workflow of
+# (tracebridge-<target>.tar.gz.sha256) and, when present, the bottles' .sha256
+# files from bottles.sh; those add a bottle block, so Homebrew pours the
+# bottle instead of "building" (which requires the Command Line Tools). The Update formulae workflow of
 # haoyibits/homebrew-tap downloads this script from the release tag, runs it
 # and commits the result.
 set -eu
@@ -13,6 +15,18 @@ version="${1:?version, e.g. 0.1.0}"
 dist="${2:?directory with the .sha256 files}"
 repo="${3:-haoyibits/tracebridge}"
 base="https://github.com/$repo/releases/download/v$version"
+
+bottle_block() {
+    lines=""
+    for tag in arm64_sonoma sonoma arm64_linux x86_64_linux; do
+        file="$dist/tracebridge-$version.$tag.bottle.tar.gz.sha256"
+        [ -f "$file" ] || continue
+        lines="$lines    sha256 cellar: :any_skip_relocation, $tag: \"$(cut -d ' ' -f 1 "$file")\"
+"
+    done
+    [ -n "$lines" ] || return 0
+    printf '\n  bottle do\n    root_url "%s"\n%s  end\n' "$base" "$lines"
+}
 
 sha() {
     file="$dist/tracebridge-$1.tar.gz.sha256"
@@ -27,6 +41,7 @@ class Tracebridge < Formula
   homepage "https://github.com/$repo"
   version "$version"
   license "MIT"
+$(bottle_block)
 
   on_macos do
     on_arm do

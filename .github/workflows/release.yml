@@ -85,6 +85,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Homebrew bottles
+        run: packaging/homebrew/bottles.sh "${GITHUB_REF_NAME#v}" dist
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
