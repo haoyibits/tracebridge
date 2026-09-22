@@ -278,6 +278,11 @@ id 回绕：… fe → 00 → 01
 
 **发布方案：手写 GitHub Actions，不用 cargo-dist。** 只有 4 个目标，产物就是 tar.gz 和 sha256，安装位置要求 `~/.local/bin`。cargo-dist 会生成它自己的安装器（默认装到 `~/.cargo/bin`），还要引入 dist 配置和每次重新生成的 workflow，收益小于维护成本。Linux 两个 musl 目标都在对应架构的原生 runner 上构建（ubuntu-24.04 / ubuntu-24.04-arm + musl-tools），不需要 cross；macOS 两个目标都在 macos-14 上构建。
 
+**Homebrew**：通过自己的 tap 发布（`brew install haoyibits/tap/tracebridge`），暂不提交 homebrew-core（那边对项目知名度有要求）。
+- Release workflow 的 `homebrew` 任务用 `packaging/homebrew/formula.sh` 生成 formula，推到 `<owner>/homebrew-tap` 的 `Formula/tracebridge.rb`。
+- 这一步需要仓库 secret `HOMEBREW_TAP_TOKEN`：一个 fine-grained PAT，只对 homebrew-tap 仓库有 Contents 读写权限。没配置时跳过，不影响 GitHub Release 本身。
+- Release 开始时会检查 tag 与 Cargo.toml 的版本号是否一致。
+
 ### 手动验证清单（需要真实 PowerView/硬件，均未验证）
 1. **t32rcl 对照**：PowerView 运行时，分别执行 `cargo run -p t32rcl --example smoke -- --address E:0x<RAM> --length 32` 和 `python3 crates/t32rcl/tools/smoke.py --address E:0x<RAM> --length 32`，两边输出应完全一致。
 2. **真实抓包 fixture**：先运行 `cargo run -p t32rcl --example capture_proxy -- --out crates/t32rcl/tests/fixtures/powerview`，再运行 `python3 crates/t32rcl/tools/capture_session.py --port 20001 --session crates/t32rcl/tests/fixtures/powerview/session.txt --address E:0x<RAM> --symbol '\\<program>\Global\_SEGGER_RTT'`，最后 `cargo test -p t32rcl --test replay`。

@@ -23,6 +23,14 @@ Supported hosts: macOS (Apple silicon, Intel) and Linux (x86_64, aarch64).
 
 ## Install
 
+With Homebrew (macOS or Linux):
+
+```sh
+brew install haoyibits/tap/tracebridge
+```
+
+Or with the install script:
+
 ```sh
 curl -fsSL https://github.com/haoyibits/tracebridge/releases/latest/download/install.sh | sh
 ```

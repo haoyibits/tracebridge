@@ -11,7 +11,20 @@ permissions:
   contents: write
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the crate version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match version $version in Cargo.toml" >&2
+            exit 1
+          fi
+
   build:
+    needs: check
     strategy:
       fail-fast: false
       matrix:
@@ -34,9 +47,10 @@ jobs:
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p tracebridge
-        env:
-          TRACEBRIDGE_GIT_HASH: ${{ github.sha }}
+        shell: bash
+        run: |
+          export TRACEBRIDGE_GIT_HASH="${GITHUB_SHA::10}"
+          cargo build --release --locked --target ${{ matrix.target }} -p tracebridge
       - name: Check that Linux binaries are static
         if: contains(matrix.target, 'musl')
         run: |
@@ -77,3 +91,31 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" dist/* install.sh \
             --title "tracebridge ${GITHUB_REF_NAME}" --generate-notes
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Update the Homebrew tap
+        if: env.TAP_TOKEN != ''
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/${{ github.repository_owner }}/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          packaging/homebrew/formula.sh "$version" dist "${{ github.repository }}" > tap/Formula/tracebridge.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/tracebridge.rb
+          git commit -m "tracebridge $version"
+          git push
+      - name: Skip without a tap token
+        if: env.TAP_TOKEN == ''
+        run: echo "HOMEBREW_TAP_TOKEN is not set; the Homebrew tap was not updated."

@@ -21,6 +21,14 @@
 
 ## 安装
 
+用 Homebrew（macOS 或 Linux）：
+
+```sh
+brew install haoyibits/tap/tracebridge
+```
+
+或者用安装脚本：
+
 ```sh
 curl -fsSL https://github.com/haoyibits/tracebridge/releases/latest/download/install.sh | sh
 ```
