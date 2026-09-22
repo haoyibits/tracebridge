@@ -1,0 +1,44 @@
+{
+    // Written by `tracebridge vscode`. The hidden task starts the DAP proxy
+    // for the "TRACE32: Attach" launch configuration. Flash, load and RTT run
+    // from a terminal: tracebridge flash | load | rtt.
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "tracebridge: adapter",
+            "detail": "Started automatically by TRACE32: Attach",
+            "hide": true,
+            "type": "process",
+            "isBackground": true,
+            "command": "__TRACEBRIDGE_EXE__",
+            "args": [
+                "--config",
+                "__TRACEBRIDGE_CONFIG__",
+                "adapter"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "focus": false,
+                "panel": "dedicated",
+                "clear": true
+            },
+            "problemMatcher": [
+                {
+                    "owner": "tracebridge-adapter",
+                    "pattern": {
+                        "regexp": "^(ERROR):([^:]+):(\\d+):(.*)$",
+                        "severity": 1,
+                        "file": 2,
+                        "line": 3,
+                        "message": 4
+                    },
+                    "background": {
+                        "activeOnStart": true,
+                        "beginsPattern": "^.*starting debug adapter proxy.*$",
+                        "endsPattern": "^\\[tracebridge\\] adapter listening on 127\\.0\\.0\\.1:__T32_DAP_PORT__.*$"
+                    }
+                }
+            ]
+        }
+    ]
+}

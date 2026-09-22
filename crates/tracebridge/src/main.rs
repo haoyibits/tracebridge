@@ -9,9 +9,11 @@ mod powerview;
 mod pycompat;
 mod remote;
 mod rtt;
+mod rustrover;
 mod t32config;
 mod target;
 mod ui;
+mod vscode;
 
 use std::path::{Path, PathBuf};
 
@@ -138,7 +140,10 @@ fn run(cli: Cli) -> Result<i32> {
             }
             rtt::run(&config, args)?
         }
-        other => bail!("{} is not implemented yet", command_name(&other)),
+        Command::Vscode => vscode::installer::install(&config, &ui::current_exe()?)?,
+        Command::Rustrover => {
+            rustrover::install(&config, &ui::current_exe()?)?;
+        }
     }
     Ok(0)
 }
@@ -189,20 +194,6 @@ fn open(config: &Config, action: Option<Action>) -> Result<()> {
         Action::Load => "symbols loaded, target running",
     });
     Ok(())
-}
-
-fn command_name(command: &Command) -> &'static str {
-    match command {
-        Command::Init => "init",
-        Command::Config => "config",
-        Command::Open => "open",
-        Command::Flash => "flash",
-        Command::Load => "load",
-        Command::Rtt { .. } => "rtt",
-        Command::Adapter => "adapter",
-        Command::Vscode => "vscode",
-        Command::Rustrover => "rustrover",
-    }
 }
 
 fn status(path: &Path) -> &'static str {

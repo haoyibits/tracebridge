@@ -1,0 +1,18 @@
+{
+    // Written by `tracebridge vscode`. "type": "node" plus "debugServer" is the
+    // standard VS Code way to talk to a standalone DAP server; the hidden
+    // preLaunchTask starts the tracebridge proxy in front of t32debugadapter.
+    // "debugServer" is trace32.dap_port and "trace32Port" is trace32.rcl_port.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "TRACE32: Attach",
+            "type": "node",
+            "request": "attach",
+            "debugServer": "__T32_DAP_PORT__",
+            "trace32Node": "localhost",
+            "trace32Port": "__T32_RCL_PORT__",
+            "preLaunchTask": "tracebridge: adapter"
+        }
+    ]
+}

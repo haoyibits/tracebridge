@@ -644,6 +644,7 @@ dependencies = [
  "chrono",
  "clap",
  "nix",
+ "serde",
  "serde_json",
  "t32rcl",
  "tempfile",
