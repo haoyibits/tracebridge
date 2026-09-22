@@ -124,6 +124,7 @@ pub fn powerview_arguments(config: &Config) -> Vec<String> {
 /// Start PowerView detached from this process: new session, stdin from
 /// /dev/null, stdout and stderr appended to the log, working directory at the
 /// project root.
+#[allow(unsafe_code)] // `pre_exec` has no safe equivalent for `setsid`
 fn spawn_powerview(config: &Config, log_path: &Path) -> Result<Child> {
     let log = OpenOptions::new()
         .create(true)
@@ -143,7 +144,9 @@ fn spawn_powerview(config: &Config, log_path: &Path) -> Result<Child> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: setsid is async-signal-safe and touches no Rust state.
+        // SAFETY: the closure runs in the child between fork and exec, where
+        // only async-signal-safe calls are allowed; it only calls `setsid`,
+        // which is, and touches no memory shared with the parent.
         unsafe {
             command.pre_exec(|| {
                 nix::unistd::setsid()

@@ -1,5 +1,13 @@
 //! tracebridge: Lauterbach TRACE32 PowerView from the command line, VS Code and
 //! RustRover (cli.py and t32.py of the Python tool).
+//!
+//! `unsafe` is denied crate-wide. Code that needs an operating-system interface
+//! without a safe API opts in with `#[allow(unsafe_code)]` on the enclosing
+//! function and explains itself in a `// SAFETY:` comment; today that is only
+//! the `setsid` call in `powerview::spawn_powerview`.
+
+#![deny(unsafe_code)]
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 mod config;
 mod dap;
@@ -11,6 +19,7 @@ mod pycompat;
 mod remote;
 mod rtt;
 mod rustrover;
+mod signals;
 mod t32config;
 mod target;
 mod ui;
@@ -88,15 +97,12 @@ enum Command {
 }
 
 fn main() {
-    install_interrupt_handler();
-    // Reports (config, chips, help) end quietly when the reader goes away,
-    // e.g. `tracebridge config | head`, instead of panicking on EPIPE. The
-    // long-running commands keep Rust's default of ignoring SIGPIPE: rtt must
-    // restore the terminal, and the proxy must survive a closed stdout.
-    set_sigpipe_default(true);
+    // Ctrl-C exits with 130 and a closed stdout ends quietly; the long-running
+    // commands handle both themselves (see signals.rs).
+    let handlers = signals::Handlers::install();
     let cli = Cli::parse();
     if matches!(cli.command, Command::Rtt { .. } | Command::Adapter) {
-        set_sigpipe_default(false);
+        handlers.release();
     }
     let code = match run(cli) {
         Ok(code) => code,
@@ -106,42 +112,6 @@ fn main() {
         }
     };
     std::process::exit(code);
-}
-
-fn set_sigpipe_default(default: bool) {
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::{SigHandler, Signal, signal};
-        let handler = if default {
-            SigHandler::SigDfl
-        } else {
-            SigHandler::SigIgn
-        };
-        // SAFETY: only the default or ignore disposition is installed.
-        unsafe {
-            let _ = signal(Signal::SIGPIPE, handler);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = default;
-}
-
-/// Ctrl-C ends the process with exit code 130 (the Python tool's
-/// `SystemExit(130)`). The RTT terminal and the DAP proxy install their own
-/// handlers because they need to clean up.
-fn install_interrupt_handler() {
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::{SigHandler, Signal, signal};
-        extern "C" fn on_interrupt(_: nix::libc::c_int) {
-            // SAFETY: _exit is async-signal-safe.
-            unsafe { nix::libc::_exit(130) };
-        }
-        // SAFETY: the handler only calls an async-signal-safe function.
-        unsafe {
-            let _ = signal(Signal::SIGINT, SigHandler::Handler(on_interrupt));
-        }
-    }
 }
 
 fn run(cli: Cli) -> Result<i32> {

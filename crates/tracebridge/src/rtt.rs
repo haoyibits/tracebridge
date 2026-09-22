@@ -234,29 +234,6 @@ pub fn parse_args(forwarded: &[String]) -> RttArgs {
     RttArgs::parse_from(argv)
 }
 
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
-/// Replace the exit-on-Ctrl-C handler: the terminal loop stops, restores the
-/// terminal and returns normally.
-fn catch_interrupt() {
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
-        extern "C" fn on_interrupt(_: nix::libc::c_int) {
-            INTERRUPTED.store(true, Ordering::SeqCst);
-        }
-        let action = SigAction::new(
-            SigHandler::Handler(on_interrupt),
-            SaFlags::SA_RESTART,
-            SigSet::empty(),
-        );
-        // SAFETY: the handler only stores to an atomic.
-        unsafe {
-            let _ = sigaction(Signal::SIGINT, &action);
-        }
-    }
-}
-
 /// Character-at-a-time input without echo; Ctrl-C still raises SIGINT.
 /// The previous settings are restored on drop, including during a panic.
 struct TerminalGuard {
@@ -394,12 +371,13 @@ pub fn run(config: &Config, args: RttArgs) -> Result<()> {
             .map_err(|error| bridge_error!("cannot reset the RTT read offset: {error}"))?;
     }
 
-    catch_interrupt();
+    let interrupted = std::sync::Arc::new(AtomicBool::new(false));
+    crate::signals::flag_on_interrupt(&interrupted);
     let guard = TerminalGuard::enable(!args.output_only);
     let mut pending_input: Vec<u8> = Vec::new();
     let mut consecutive_errors = 0u64;
     let mut stdout = std::io::stdout();
-    while !INTERRUPTED.load(Ordering::SeqCst) {
+    while !interrupted.load(Ordering::SeqCst) {
         let step = (|| -> t32rcl::Result<()> {
             let output = channel.read_up(&mut debugger)?;
             if !output.is_empty() {

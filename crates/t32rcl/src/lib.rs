@@ -8,6 +8,8 @@
 //! `_rc/_functions.py`. Every request is byte-for-byte what the Python library
 //! sends; see CLAUDE.md for the message inventory.
 
+#![forbid(unsafe_code)]
+
 mod address;
 mod api;
 mod error;

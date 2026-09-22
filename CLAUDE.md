@@ -67,6 +67,7 @@ cargo workspace：
 | tokio（rt、net、io-util、process、signal、sync、time、macros） | 只在 adapter | 只在 adapter 子命令里建运行时，其他子命令保持同步 |
 | thiserror | t32rcl 错误类型、BridgeError | 库里需要可匹配的错误枚举；应用层错误只是一条消息，所以不引入 anyhow |
 | nix（term、process、signal） | rtt 终端、setsid | termios 用 nix 足够，crossterm 太重；PowerView 用 `pre_exec` 里调 `setsid()` 对应 `start_new_session=True` |
+| signal-hook | Ctrl-C 退出码 130、SIGPIPE 安静退出、rtt 的 Ctrl-C 标志 | 提供安全 API（`flag::register`、`register_conditional_shutdown`），避免在自己的代码里写 `unsafe` 的信号处理（见工程规则） |
 | chrono（仅 `clock`） | 备份文件名的本地时间戳 `%Y%m%d%H%M%S` | `time` crate 在多线程的 unix 上拿不到本地时区偏移 |
 | shlex | `flash.args` 为字符串时、T32_FLASH_ARGS | **倾向自己移植** Python `shlex.split`（posix=True，comments=False）；阶段 2 用对照测试确认 shlex crate 对 `#` 等字符的处理是否一致，不一致就自己写 |
 | tempfile（dev） | 测试 | |
@@ -82,6 +83,7 @@ cargo workspace：
 - 协议字节和命令序列**必须以参考源码为准**，读不懂就问我，不要自己发明。
 - 每个阶段结束时：cargo fmt、cargo clippy --all-targets -- -D warnings、cargo test 全部通过，然后 git commit（一个阶段一个或几个 commit）。
 - 从 RCL 库移植的代码在文件头注明来源，并在 NOTICE 里保留 MIT 版权声明。
+- **`unsafe` 只能在确实必要时使用，不能为了图省事绕过编译器检查**（用户 2026-09-22 明确要求）。有安全 API 的一律用安全 API，包括经过审计的库，例如用 signal-hook 处理信号。编译器会强制执行这条规则：`t32rcl` 用 `#![forbid(unsafe_code)]`；`tracebridge` 用 `#![deny(unsafe_code)]`，必要的地方在函数上逐处 `#[allow(unsafe_code)]` 并写明原因，每个 `unsafe` 块都要有 `// SAFETY:` 注释（clippy `undocumented_unsafe_blocks`）。目前只有 `powerview::spawn_powerview` 里 `pre_exec` 调用 `setsid` 这一处。
 - 需要真实硬件或 PowerView 才能验证的部分，写成"手动验证清单"交给我，**不要声称已经验证过**。
 - 每个阶段完成后**停下来**，向我汇报：做了什么、测试结果、手动验证清单、不确定的地方。等我确认后再进入下一阶段。
 
