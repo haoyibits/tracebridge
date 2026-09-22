@@ -25,11 +25,19 @@ menu = "~~/demo/arm/kernel/freertos/freertos.men"
 show_tasks = true
 
 [flash]
-# The project's flash script. It must support Lauterbach's PREPAREONLY
-# convention: set up the target and declare its flash, then return.
-# A normal path is relative to this file; a path starting with "~~/" is
-# resolved by TRACE32. Leave empty for RAM-only targets (use load, not flash).
-script = "flash.cmm"
+# How `tracebridge flash` finds the flash script. The script must support
+# Lauterbach's PREPAREONLY convention: set up the target, declare the flash,
+# then return.
+#
+# Either leave `script` empty and name the chip: tracebridge picks the script
+# whose "; @Chip:" header matches, first from your own library
+# (~/.config/tracebridge/flash/*.cmm), then from the TRACE32 installation
+# (<sys>/demo/*/flash/*.cmm). An empty `chip` means target.cpu.
+# Try: tracebridge chips <name>
+chip = ""
+# Or give the script: a path relative to this file, or a TRACE32 path
+# starting with "~~/". It wins over `chip`.
+script = ""
 args = ["DUALPORT=1", "JTAG_CLOCK=10MHz"]
 
 [trace32]

@@ -14,6 +14,7 @@
 | `tracebridge rtt` | 双向 SEGGER RTT 终端（Ctrl-C 退出） |
 | `tracebridge vscode` | 往 `.vscode/` 写入 `TRACE32: Attach` 调试配置 |
 | `tracebridge rustrover` | 往 `.run/` 写入 `TRACE32: Attach` 运行配置 |
+| `tracebridge chips <芯片>` | 查看 `flash` 会给这个芯片用哪个烧录脚本 |
 | `tracebridge adapter` | `t32debugadapter` 前面的 DAP 代理，由 IDE 自动启动 |
 
 支持的主机：macOS（Apple 芯片、Intel）和 Linux（x86_64、aarch64）。
@@ -53,7 +54,7 @@ xattr -d com.apple.quarantine /path/to/tracebridge
 ```sh
 cd ~/work/my_app            # 项目根目录
 tracebridge init            # 生成 trace32.toml
-$EDITOR trace32.toml        # 改 program、elf、[target]、flash.script
+$EDITOR trace32.toml        # 改 program、elf、[target]、[flash]
 tracebridge config          # 每一行都应该是 ok
 tracebridge flash           # 启动 PowerView、烧录、加载符号、运行
 tracebridge vscode          # 或者：tracebridge rustrover
@@ -78,7 +79,36 @@ tracebridge vscode          # 或者：tracebridge rustrover
 
 运行时文件（PowerView 日志、工具栏脚本）写在 `<项目>/.tracebridge/`，这个目录里自带 `.gitignore`。
 
-flash 脚本由项目自己提供，必须支持 `PREPAREONLY` 约定：脚本只初始化目标板、声明 Flash，然后返回。之后由 tracebridge 执行 `FLASH.ReProgram ALL /Erase`、`Data.LOAD.Elf`、`FLASH.ReProgram OFF`、`SYStem.Down`、`SYStem.Up`。
+### 烧录脚本怎么选
+
+烧录脚本必须支持 `PREPAREONLY` 约定：脚本只初始化目标板、声明 Flash，然后返回。之后由 tracebridge 执行 `FLASH.ReProgram ALL /Erase`、`Data.LOAD.Elf`、`FLASH.ReProgram OFF`、`SYStem.Down`、`SYStem.Up`。
+
+可以不写脚本路径，只写芯片名：
+
+```toml
+[flash]
+chip = "STM32H743ZI"    # 留空则用 target.cpu
+script = ""             # 写了路径就优先用它
+```
+
+tracebridge 按下面的顺序查找：
+
+1. **你的脚本库** `~/.config/tracebridge/flash/*.cmm`。放多个项目共用的脚本，比如 FAE 单独给的、官方发布里没有的脚本。
+2. **TRACE32 安装目录** `<trace32.sys>/demo/*/flash/*.cmm`，里面有一千多个芯片的脚本。
+
+脚本要被选中，需要同时满足两个条件：头部有能匹配芯片名的 `; @Chip:` 行（允许通配符，如 `STM32H7*`），并且支持 `PREPAREONLY`。有多个脚本匹配时按下面的规则选：
+
+- 精确名字优先于通配符；通配符中字面部分越长越优先。
+- 片内 Flash 脚本（如 `stm32f4xx.cmm`）优先于外部存储的变体（`-qspi`、`-spi`、`-emmc`、`-optionbyte` 等）。
+- 以上规则分不出高下时会直接报错，这时请在 `flash.script` 里写明路径。
+
+```sh
+tracebridge chips SR6P6              # 看会选哪个脚本
+tracebridge flash --chip SR6P6       # 临时指定芯片
+tracebridge flash --script <路径>    # 临时指定脚本
+```
+
+往脚本库里加脚本：复制过去，并确认头部有一行 `; @Chip: <芯片名>`。许可证写着仅限 TRACE32 使用的脚本不要提交进公开仓库，放在脚本库里就好。
 
 ## 在 IDE 里调试
 
@@ -110,7 +140,7 @@ tracebridge rtt --output-only   # 不转发键盘输入
 
 1. 安装 tracebridge。不再需要 Python 和 `lauterbach-trace32-rcl`。
 2. 把 `trace32.toml` 从工具包目录移到项目根目录，删掉 `root = ".."`。现在项目根目录就是这个文件所在的目录；文件里如果还有 `project.root`，tracebridge 会报错。
-3. `flash.script` 改成相对项目根目录的路径，也可以继续用 `~~/` 开头的 TRACE32 路径。
+3. 把烧录脚本放进脚本库 `~/.config/tracebridge/flash/`（头部要有 `; @Chip:` 行），在配置里写 `flash.chip`。也可以继续用 `flash.script` 写相对项目根目录的路径，或 `~~/` 开头的 TRACE32 路径。
 4. `trace32.sys`、`binary`、`config`、`debug_adapter` 如果写的是相对路径，现在也是相对项目根目录，而不是相对当前目录。
 5. 运行 `tracebridge vscode`。它会删掉旧的 `T32: Flash`、`T32: Load ELF`、`T32: RTT Viewer`、`T32: Start Debug Adapter` 四个 task，只留一个隐藏的 adapter task，并更新 `TRACE32: Attach`。烧录、加载和 RTT 改用命令行。
 6. 删掉复制进项目的工具包目录（`t32.py`、`trace32_bridge/`、`.run/`）。

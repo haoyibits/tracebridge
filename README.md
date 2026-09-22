@@ -16,6 +16,7 @@ your project except a `trace32.toml`.
 | `tracebridge rtt` | Bidirectional SEGGER RTT terminal (Ctrl-C to quit) |
 | `tracebridge vscode` | Add the `TRACE32: Attach` debug configuration to `.vscode/` |
 | `tracebridge rustrover` | Add the `TRACE32: Attach` run configuration to `.run/` |
+| `tracebridge chips <name>` | Show which flash script `flash` would use for a chip |
 | `tracebridge adapter` | DAP proxy in front of `t32debugadapter`; the IDE starts it |
 
 Supported hosts: macOS (Apple silicon, Intel) and Linux (x86_64, aarch64).
@@ -65,7 +66,7 @@ From source: `cargo install --path crates/tracebridge`.
 ```sh
 cd ~/work/my_app            # the project root
 tracebridge init            # writes trace32.toml
-$EDITOR trace32.toml        # program, elf, [target], flash.script
+$EDITOR trace32.toml        # program, elf, [target], [flash]
 tracebridge config          # every line should say "ok"
 tracebridge flash           # start PowerView, program, load symbols, run
 tracebridge vscode          # or: tracebridge rustrover
@@ -94,7 +95,7 @@ to the directory that contains it. `tracebridge init` writes this template:
 | `[project]` | `program` (TRACE32 program name), `elf` |
 | `[target]` | `cpu`, `cores`, `mem_access`, `jtag_clock`, `dual_port` |
 | `[rtos]` | `config`, `menu`, `show_tasks` (empty = no RTOS awareness) |
-| `[flash]` | `script` (must support `PREPAREONLY`), `args` |
+| `[flash]` | `chip` or `script` (see below), `args` |
 | `[trace32]` | `sys`, `host`, `executable`, `binary`, `config`, `debug_adapter`, `rcl_port`, `dap_port`, `dap_backend_port`, `dap_backend_timeout`, `operation_timeout` |
 | `[rtt]` | `symbol`, `control_block_address`, `poll_interval` |
 
@@ -107,6 +108,7 @@ environment, then `trace32.toml`, then defaults:
 | `T32_HOST`, `T32_EXE`, `T32_BIN`, `T32_CONFIG`, `T32_DEBUG_ADAPTER` | `trace32.*` paths | ignored |
 | `PROJECT_ROOT`, `ELF` | project directory, `project.elf` | ignored |
 | `RTT_SYMBOL` | `rtt.symbol` | ignored |
+| `T32_FLASH_CHIP` | `flash.chip` | ignored |
 | `PROGRAM_NAME`, `T32_CPU`, `T32_CORES`, `T32_MEMACCESS`, `T32_JTAG_CLOCK`, `T32_DUALPORT`, `T32_FLASH_SCRIPT` | the same keys | **used** (clears the value) |
 | `T32_FLASH_ARGS` | `flash.args`, split like a shell command line | **used** (no arguments) |
 | `T32_RCL_PORT`, `T32_DAP_PORT`, `T32_DAP_BACKEND_PORT`, `T32_DAP_BACKEND_TIMEOUT`, `T32_TIMEOUT` | ports and timeouts | ignored |
@@ -115,11 +117,11 @@ environment, then `trace32.toml`, then defaults:
 Runtime files (the PowerView log, the toolbar script) are written to
 `<project>/.tracebridge/`, which contains its own `.gitignore`.
 
-### Flash script contract
+### Choosing the flash script
 
-The project owns its flash script. It must support Lauterbach's `PREPAREONLY`
-convention: set up the target, declare the flash, and return without
-programming. tracebridge then runs:
+`tracebridge flash` needs a flash script that supports Lauterbach's
+`PREPAREONLY` convention: set up the target, declare the flash, and return
+without programming. tracebridge then runs:
 
 ```text
 FLASH.ReProgram ALL /Erase
@@ -128,6 +130,47 @@ FLASH.ReProgram OFF
 SYStem.Down
 SYStem.Up
 ```
+
+Name the chip instead of a file and tracebridge picks the script:
+
+```toml
+[flash]
+chip = "STM32H743ZI"    # empty: use target.cpu
+script = ""             # a path here wins over chip
+```
+
+It looks, in this order, in
+
+1. **your library**, `~/.config/tracebridge/flash/*.cmm`
+   (`$XDG_CONFIG_HOME/tracebridge/flash`), for scripts you share between
+   projects, such as a vendor-provided or modified script that is not part of
+   the TRACE32 release;
+2. **the TRACE32 installation**, `<trace32.sys>/demo/*/flash/*.cmm`, about a
+   thousand chip scripts.
+
+A script qualifies when its header has a matching `; @Chip:` line (Lauterbach's
+format, wildcards allowed, e.g. `; @Chip: STM32H7*`) and it supports
+`PREPAREONLY`. An exact pattern beats a wildcard and a longer wildcard beats a
+shorter one; the internal-flash script (`stm32f4xx.cmm`) beats memory variants
+(`stm32f4xx-qspi.cmm`, `-spi`, `-emmc`, `-optionbyte`, ...). Remaining ties
+are reported; set `flash.script` then.
+
+```sh
+tracebridge chips STM32H743ZI        # which script, and related ones
+tracebridge flash --chip SR6P6       # one-off override
+tracebridge flash --script ~~/demo/arm/flash/stm32h7-qspi.cmm
+```
+
+To add a script to the library, copy it there and make sure its header has a
+`; @Chip: <name>` line:
+
+```sh
+mkdir -p ~/.config/tracebridge/flash
+cp sr6p6.cmm ~/.config/tracebridge/flash/
+```
+
+Keep scripts that come with a TRACE32-only license out of public
+repositories; the library is the place for them.
 
 ## Debugging from an IDE
 
@@ -190,8 +233,9 @@ restores its settings on exit.
 2. Move `trace32.toml` from the toolkit directory to the project root and
    delete `root = ".."`: the project root is now the directory that contains
    the file (tracebridge rejects `project.root`).
-3. Make `flash.script` relative to the project root (for example
-   `flash.script = "tools/flash.cmm"`), or keep a `~~/` TRACE32 path.
+3. Move the flash script into the library (`~/.config/tracebridge/flash/`,
+   with a `; @Chip:` header) and set `flash.chip`, or keep `flash.script` as
+   a path relative to the project root or a `~~/` TRACE32 path.
 4. Relative `trace32.sys`, `binary`, `config` and `debug_adapter` values are
    now relative to the project root instead of the current directory.
 5. Run `tracebridge vscode`. It replaces the old `T32: Flash`, `T32: Load

@@ -114,3 +114,35 @@ fn missing_powerview_is_reported_when_nothing_listens() {
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).starts_with("tracebridge: PowerView not found: "));
 }
+
+#[test]
+fn flash_script_is_chosen_by_chip_from_the_library() {
+    let rcl = FakeRcl::start();
+    let project = Project::new(rcl.port, "");
+    // The test HOME is the project directory, so the library lives inside it.
+    let library = project.root().join(".config/tracebridge/flash");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::write(
+        library.join("board.cmm"),
+        "; @Chip: MYCHIP*\n; DO board [PREPAREONLY]\n",
+    )
+    .unwrap();
+    let output = project.run(&["flash", "--chip", "MYCHIP-A"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("(library script for MYCHIP-A, @Chip MYCHIP*)"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        rcl.state().log[1],
+        format!(
+            "cmd DO \"{}\" PREPAREONLY",
+            library.join("board.cmm").display()
+        )
+    );
+
+    let output = project.run(&["flash", "--chip", "OTHER"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("no flash script found for chip OTHER"));
+}

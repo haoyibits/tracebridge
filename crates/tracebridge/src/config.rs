@@ -33,6 +33,7 @@ pub struct Config {
     pub rtos_config: String,
     pub rtos_menu: String,
     pub rtos_show_tasks: bool,
+    pub flash_chip: String,
     pub flash_script: String,
     pub flash_args: Vec<String>,
     pub t32_sys: PathBuf,
@@ -309,6 +310,7 @@ pub fn load_config(config_file: &Path, env: &Env) -> Result<Config> {
     let rtos_config = text(rtos, "config", "")?;
     let rtos_menu = text(rtos, "menu", "")?;
     let rtos_show_tasks = boolean(rtos, "show_tasks", false)?;
+    let flash_chip = env_text(env, "T32_FLASH_CHIP", text(flash, "chip", "")?);
     let flash_script = env_override(env, "T32_FLASH_SCRIPT", text(flash, "script", "")?);
     let flash_args = env_arguments(env, "T32_FLASH_ARGS", string_list(flash, "args")?)?;
     let rcl_port = env_integer(env, "T32_RCL_PORT", integer(trace32, "rcl_port", 20000)?)?;
@@ -373,6 +375,7 @@ pub fn load_config(config_file: &Path, env: &Env) -> Result<Config> {
         rtos_config,
         rtos_menu,
         rtos_show_tasks,
+        flash_chip,
         flash_script,
         flash_args,
         t32_sys,

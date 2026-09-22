@@ -250,6 +250,13 @@ id 回绕：… fe → 00 → 01
   - config 输出：在原来的 ok/MISSING 列表上，加上 toml、run_dir、exe 路径和端口，以及 flash.script 是否存在；config.t32 里没有 `RCL=NETTCP`，或 `PORT=` 跟 rcl_port 对不上时打印 WARN。
   - 启动 PowerView：config.t32 里**没有** `RCL=` 行时，追加参数 `--t32-api-rcl=TCP:<rcl_port>`；有就不加，避免冲突。
   - 工具栏只保留 Flash / Load ELF 两个按钮。
+- **烧录脚本选择**（2026-09-22，用户提出"在 toml 里选芯片而不是写 cmm 路径"）：
+  - `flash.script` 为空时，按芯片名（`flash.chip`，空则取 `target.cpu`；环境变量 `T32_FLASH_CHIP`）选脚本。
+  - 查找顺序：先是用户脚本库 `~/.config/tracebridge/flash/*.cmm`（遵守 XDG_CONFIG_HOME），再是 TRACE32 安装目录 `<sys>/demo/*/flash/*.cmm`。
+  - 候选条件：脚本头的 `@Chip:` 能匹配芯片名，并且支持 PREPAREONLY。
+  - 优先级依次为：库 > 安装目录；精确名字 > 通配符；字面部分长 > 字面部分短；片内 Flash 脚本 > `<family>-<memory>` 变体。仍然平局就报错。
+  - 相关命令：`tracebridge chips <name>`、`flash --chip/--script`。实现在 `flash.rs`。
+  - 用户的 SR6P6 脚本是从 Lauterbach FAE 那里拿到的（官方发布里没有），许可证是 "TRACE32 only"。它已复制到 `~/.config/tracebridge/flash/sr6p6.cmm`，**不得提交进仓库**。
 - **工作方式**：用户 2026-09-22 指示"决定好后直接开始项目，最后告诉我使用方法"。因此各阶段连续推进，每阶段照样执行 fmt、clippy、test 并提交，全部完成后统一汇报，附使用方法和手动验证清单。
 
 ---

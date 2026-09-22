@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::errors::Result;
+use crate::flash::{self, Choice};
 use crate::powerview::require_file;
+use crate::pycompat::Env;
 use crate::remote::{CONNECT_TIMEOUT, Rcl, connect_debugger};
 use crate::{bail, bridge_error};
 
@@ -24,36 +26,50 @@ impl Action {
     }
 }
 
-/// `validate_target_action`.
-pub fn validate_target_action(config: &Config, action: Action) -> Result<()> {
+/// `validate_target_action`: the ELF must exist, and flashing needs a script
+/// (returned, as passed to `DO`).
+pub fn validate_target_action(
+    config: &Config,
+    action: Action,
+    env: &Env,
+) -> Result<Option<Choice>> {
     require_file(&config.elf, "ELF", false)?;
-    if action == Action::Flash {
-        if config.flash_script.is_empty() {
-            bail!("flash.script is empty in trace32.toml; use load for RAM images");
-        }
-        if !config.flash_script_exists() {
-            bail!("flash script not found: {}", config.resolved_flash_script());
-        }
+    if action == Action::Load {
+        return Ok(None);
     }
-    Ok(())
+    let choice = flash::resolve(config, env)?;
+    if matches!(choice, Choice::Explicit(_)) && !config.flash_script_exists() {
+        bail!("flash script not found: {}", config.resolved_flash_script());
+    }
+    Ok(Some(choice))
 }
 
 /// `run_target`. After connecting, every answer may take up to
 /// `operation_timeout` seconds: `FLASH.ReProgram OFF` programs the flash and
 /// can take much longer than the connection timeout.
-pub fn run_target(config: &Config, action: Action) -> Result<()> {
-    validate_target_action(config, action)?;
+pub fn run_target(config: &Config, script: Option<&str>) -> Result<()> {
+    let action = if script.is_some() {
+        Action::Flash
+    } else {
+        Action::Load
+    };
     let mut debugger = connect_debugger(config, CONNECT_TIMEOUT)?;
     debugger
         .set_timeout(Duration::from_secs(config.operation_timeout))
         .map_err(|error| bridge_error!("TRACE32 {} failed: {error}", action.name()))?;
-    run_sequence(config, action, &mut debugger)
+    run_sequence(config, script, &mut debugger)
 }
 
-pub fn run_sequence(config: &Config, action: Action, debugger: &mut impl Rcl) -> Result<()> {
+/// Flash with `script` when given, then set up debugging.
+pub fn run_sequence(config: &Config, script: Option<&str>, debugger: &mut impl Rcl) -> Result<()> {
+    let action = if script.is_some() {
+        Action::Flash
+    } else {
+        Action::Load
+    };
     let result = (|| {
-        if action == Action::Flash {
-            program(config, debugger)?;
+        if let Some(script) = script {
+            program(config, script, debugger)?;
         }
         setup_debug(config, debugger)
     })();
@@ -68,8 +84,8 @@ pub fn run_sequence(config: &Config, action: Action, debugger: &mut impl Rcl) ->
 
 /// `program`: run the project's flash script in PREPAREONLY mode, then erase,
 /// program and verify through FLASH.ReProgram.
-pub fn program(config: &Config, debugger: &mut impl Rcl) -> t32rcl::Result<()> {
-    let mut command = format!("\"{}\" PREPAREONLY", config.resolved_flash_script());
+pub fn program(config: &Config, script: &str, debugger: &mut impl Rcl) -> t32rcl::Result<()> {
+    let mut command = format!("\"{script}\" PREPAREONLY");
     if !config.flash_args.is_empty() {
         command.push(' ');
         command.push_str(&config.flash_args.join(" "));
@@ -170,6 +186,7 @@ pub mod tests {
             rtos_config: String::new(),
             rtos_menu: String::new(),
             rtos_show_tasks: false,
+            flash_chip: String::new(),
             flash_script: flash.to_string_lossy().into_owned(),
             flash_args: Vec::new(),
             t32_sys: root.to_path_buf(),
@@ -194,23 +211,37 @@ pub mod tests {
         (dir, config)
     }
 
-    // test_target.py: test_flash_requires_configured_script
+    fn no_env() -> Env {
+        [("XDG_CONFIG_HOME".to_string(), "/nonexistent-tb".to_string())].into()
+    }
+
+    // test_target.py: test_flash_requires_configured_script (now: a script or a chip)
     #[test]
-    fn flash_requires_configured_script() {
+    fn flash_requires_a_script_or_a_chip() {
         let (_dir, mut config) = fixture();
         config.flash_script = String::new();
-        let error = validate_target_action(&config, Action::Flash).unwrap_err();
-        assert!(error.0.contains("flash.script is empty"));
+        config.cpu = String::new();
+        let error = validate_target_action(&config, Action::Flash, &no_env()).unwrap_err();
+        assert!(
+            error.0.starts_with("no flash script: set flash.chip"),
+            "{error}"
+        );
+        config.cpu = "CPU".into();
+        let error = validate_target_action(&config, Action::Flash, &no_env()).unwrap_err();
+        assert!(
+            error.0.starts_with("no flash script found for chip CPU"),
+            "{error}"
+        );
     }
 
     #[test]
     fn missing_elf_and_script_are_reported() {
         let (_dir, mut config) = fixture();
         config.flash_script = config.config_dir.join("nope.cmm").to_string_lossy().into();
-        let error = validate_target_action(&config, Action::Flash).unwrap_err();
+        let error = validate_target_action(&config, Action::Flash, &no_env()).unwrap_err();
         assert!(error.0.starts_with("flash script not found: "));
         config.elf = PathBuf::from("/nonexistent-tb/app.elf");
-        let error = validate_target_action(&config, Action::Load).unwrap_err();
+        let error = validate_target_action(&config, Action::Load, &no_env()).unwrap_err();
         assert_eq!(error.0, "ELF not found: /nonexistent-tb/app.elf");
     }
 
@@ -224,7 +255,7 @@ pub mod tests {
         config.rtos_menu = "~~/freertos.men".into();
         config.rtos_show_tasks = true;
         let mut recorder = Recorder::default();
-        run_sequence(&config, Action::Load, &mut recorder).unwrap();
+        run_sequence(&config, None, &mut recorder).unwrap();
         let elf = config.elf.display();
         assert_eq!(
             recorder.calls,
@@ -256,7 +287,7 @@ pub mod tests {
             state_run: true,
             ..Default::default()
         };
-        run_sequence(&config, Action::Load, &mut recorder).unwrap();
+        run_sequence(&config, None, &mut recorder).unwrap();
         let elf = config.elf.display();
         assert_eq!(
             recorder.calls,
@@ -281,7 +312,12 @@ pub mod tests {
             state_run: true,
             ..Default::default()
         };
-        run_sequence(&config, Action::Flash, &mut recorder).unwrap();
+        run_sequence(
+            &config,
+            Some(&config.resolved_flash_script()),
+            &mut recorder,
+        )
+        .unwrap();
         let elf = config.elf.display();
         let script = config.resolved_flash_script();
         assert_eq!(
@@ -315,7 +351,7 @@ pub mod tests {
             fail_on: Some("Data.LOAD.Elf".into()),
             ..Default::default()
         };
-        let error = program(&config, &mut recorder).unwrap_err();
+        let error = program(&config, "flash.cmm", &mut recorder).unwrap_err();
         assert!(error.to_string().contains("Data.LOAD.Elf"));
         let commands = recorder.commands();
         let load = commands
@@ -334,7 +370,7 @@ pub mod tests {
             system_up: true,
             ..Default::default()
         };
-        let error = run_sequence(&config, Action::Load, &mut recorder).unwrap_err();
+        let error = run_sequence(&config, None, &mut recorder).unwrap_err();
         assert_eq!(error.0, "TRACE32 load failed: List.auto failed");
     }
 }
