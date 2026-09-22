@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-14
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p tracebridge
+        env:
+          TRACEBRIDGE_GIT_HASH: ${{ github.sha }}
+      - name: Check that Linux binaries are static
+        if: contains(matrix.target, 'musl')
+        run: |
+          file target/${{ matrix.target }}/release/tracebridge
+          ! ldd target/${{ matrix.target }}/release/tracebridge 2>/dev/null | grep -q '=>'
+      - name: Package
+        shell: bash
+        run: |
+          name=tracebridge-${{ matrix.target }}
+          mkdir -p dist/$name
+          cp target/${{ matrix.target }}/release/tracebridge README.md LICENSE NOTICE dist/$name/
+          tar -C dist -czf dist/$name.tar.gz $name
+          cd dist
+          if command -v sha256sum >/dev/null; then
+            sha256sum $name.tar.gz > $name.tar.gz.sha256
+          else
+            shasum -a 256 $name.tar.gz > $name.tar.gz.sha256
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tracebridge-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* install.sh \
+            --title "tracebridge ${GITHUB_REF_NAME}" --generate-notes

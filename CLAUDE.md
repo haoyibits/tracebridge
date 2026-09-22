@@ -186,6 +186,8 @@ id 回绕：… fe → 00 → 01
 | `errors.rs` | `errors.py` | — |
 | `config.rs` | `config.py` | `test_config.py` 全部 5 条（toolkit_dir 改成 toml 目录）+ 新增：向上查找、`--config` 优先级、每个环境变量的空值语义 |
 | `pycompat.rs` | Python 标准库语义（expanduser/expandvars、resolve、int、shlex.split） | 新增对照单测 |
+| `t32config.rs` | 新增：读取 config.t32 的 RCL=/PORT= | 单测 |
+| `ui.rs` | cli.py 的 `info`、current_exe | — |
 | `init.rs` + `assets/trace32.toml` | 新增（蓝本是旧 trace32.toml） | 新增：生成内容能被 config 解析；已存在时拒绝覆盖 |
 | `powerview.rs` + `assets/toolbar.cmm` | `powerview.py`、`cmm/toolbar.cmm` | `test_powerview.py` 4 条（toolbar 命令字符串改为 `"<run>/toolbar.cmm" "<exe>" "<toml>"`） |
 | `remote.rs` | `remote.py` | `test_remote.py` |
@@ -253,6 +255,33 @@ id 回绕：… fe → 00 → 01
 ---
 
 ## 实施阶段
+
+### 进度
+| 阶段 | 状态 | 提交 |
+|---|---|---|
+| 0 规划 | ✅ | 2bb9b7a、54a24cc |
+| 1 t32rcl | ✅ 与 Python 库生成的会话逐字节一致（tests/replay.rs） | 09fa2ef |
+| 2 配置和 CLI | ✅ | 8970206 |
+| 3 open/flash/load | ✅ | 2f843c5 |
+| 4 adapter | ✅ | 313c46d |
+| 5 rtt | ✅ 含 pty 下的终端模式测试 | 4513680 |
+| 6 vscode/rustrover | ✅ | 67bc952 |
+| 7 发布 | ✅ 手写 workflow（理由见下） | 见 git log |
+
+**发布方案：手写 GitHub Actions，不用 cargo-dist。** 只有 4 个目标，产物就是 tar.gz 和 sha256，安装位置要求 `~/.local/bin`。cargo-dist 会生成它自己的安装器（默认装到 `~/.cargo/bin`），还要引入 dist 配置和每次重新生成的 workflow，收益小于维护成本。Linux 两个 musl 目标都在对应架构的原生 runner 上构建（ubuntu-24.04 / ubuntu-24.04-arm + musl-tools），不需要 cross；macOS 两个目标都在 macos-14 上构建。
+
+### 手动验证清单（需要真实 PowerView/硬件，均未验证）
+1. **t32rcl 对照**：PowerView 运行时，分别执行 `cargo run -p t32rcl --example smoke -- --address E:0x<RAM> --length 32` 和 `python3 crates/t32rcl/tools/smoke.py --address E:0x<RAM> --length 32`，两边输出应完全一致。
+2. **真实抓包 fixture**：先运行 `cargo run -p t32rcl --example capture_proxy -- --out crates/t32rcl/tests/fixtures/powerview`，再运行 `python3 crates/t32rcl/tools/capture_session.py --port 20001 --session crates/t32rcl/tests/fixtures/powerview/session.txt --address E:0x<RAM> --symbol '\\<program>\Global\_SEGGER_RTT'`，最后 `cargo test -p t32rcl --test replay`。
+3. **open 冷启动**：没有 PowerView 时执行 `tracebridge open`。PowerView 应能启动，`.tracebridge/powerview.log` 有内容，工具栏多出 Flash/Load ELF 两个按钮。
+4. **open 复用**：PowerView 已在运行时执行 `tracebridge open`，应提示 reusing，且不装工具栏。
+5. **flash / load**：在真实板子上执行，AREA 窗口应出现 `tracebridge: flashed …` 和 `tracebridge: symbols loaded for …`。大镜像烧录（`FLASH.ReProgram OFF` 很久）时不应超时。
+6. **工具栏按钮**：分别点 Flash 和 Load ELF，项目路径带空格的情况也要试。ENTRY 的引号处理沿用 Python 版的写法，没有在真机上验证过。
+7. **`--t32-api-rcl=TCP:<port>`**：从 config.t32 删掉 RCL 段后执行 `tracebridge open`，确认 PowerView 接受这个参数、端口可用；有 RCL 段时不应加这个参数。
+8. **VS Code**：执行 `tracebridge vscode` 后按 F5，检查断点、单步、Restart、Locals 为空、停止调试后代理退出。
+9. **RustRover**：装好 LSP4IJ 后执行 `tracebridge rustrover`，确认运行配置出现，Debug 能启动代理并连上，`.c` 文件里能打断点。**serverMappings 的 XML 格式是按 IntelliJ 序列化规则推断的**，如果不生效，就在 Mappings 页手动添加文件名模式。
+10. **RTT**：在真实目标上检查输出、键盘输入，Ctrl-C 后终端恢复正常。
+11. **发布**：推一个 tag，检查 4 个产物和 sha256。确认仓库名 `haoyibits/tracebridge`（install.sh 和 README 里的默认值是按 git 作者名假设的），再用 install.sh 从 GitHub 安装一次。
 
 ### 阶段 0：通读和规划 ✅（本文档）
 
