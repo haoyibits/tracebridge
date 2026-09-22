@@ -4,8 +4,9 @@
 #   packaging/homebrew/formula.sh <version> <dist dir> [owner/repo] > tracebridge.rb
 #
 # <dist dir> holds the release archives' .sha256 files
-# (tracebridge-<target>.tar.gz.sha256). The release workflow runs this and
-# commits the result to the tap repository <owner>/homebrew-tap.
+# (tracebridge-<target>.tar.gz.sha256). The Update formulae workflow of
+# haoyibits/homebrew-tap downloads this script from the release tag, runs it
+# and commits the result.
 set -eu
 
 version="${1:?version, e.g. 0.1.0}"

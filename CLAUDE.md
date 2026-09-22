@@ -278,9 +278,9 @@ id 回绕：… fe → 00 → 01
 
 **发布方案：手写 GitHub Actions，不用 cargo-dist。** 只有 4 个目标，产物就是 tar.gz 和 sha256，安装位置要求 `~/.local/bin`。cargo-dist 会生成它自己的安装器（默认装到 `~/.cargo/bin`），还要引入 dist 配置和每次重新生成的 workflow，收益小于维护成本。Linux 两个 musl 目标都在对应架构的原生 runner 上构建（ubuntu-24.04 / ubuntu-24.04-arm + musl-tools），不需要 cross；macOS 两个目标都在 macos-14 上构建。
 
-**Homebrew**：通过自己的 tap 发布（`brew install haoyibits/tap/tracebridge`），暂不提交 homebrew-core（那边对项目知名度有要求）。
-- Release workflow 的 `homebrew` 任务用 `packaging/homebrew/formula.sh` 生成 formula，推到 `<owner>/homebrew-tap` 的 `Formula/tracebridge.rb`。
-- 这一步需要仓库 secret `HOMEBREW_TAP_TOKEN`：一个 fine-grained PAT，只对 homebrew-tap 仓库有 Contents 读写权限。没配置时跳过，不影响 GitHub Release 本身。
+**Homebrew**：通过自己的 tap `haoyibits/homebrew-tap` 发布（`brew install haoyibits/tap/tracebridge`），暂不提交 homebrew-core。
+- tap 仓库的 `Update formulae` workflow 每小时整点后 17 分运行一次，也可以手动触发。它用自带的 GITHUB_TOKEN 读取 tracebridge 的最新 release，下载各平台的 `.sha256`，再从对应 tag 下载 `packaging/homebrew/formula.sh` 生成 formula 并提交。整个流程不需要跨仓库的 PAT。
+- 注意：公开仓库连续 60 天没有活动，GitHub 会停用定时 workflow。发布新版本后如果 formula 没更新，到 tap 仓库的 Actions 页面手动运行一次即可。
 - Release 开始时会检查 tag 与 Cargo.toml 的版本号是否一致。
 
 ### 手动验证清单（需要真实 PowerView/硬件，均未验证）
