@@ -47,7 +47,7 @@ Python 版假设工具包被复制进项目目录（config.py 的 TOOLKIT_DIR、
 | validate_common 里的 "toolkit path" 检查 | toolkit 路径 | 改为检查 toml 路径和 run_dir（它们都会拼进 TRACE32 命令） |
 
 ## 子命令
-init、config、open、flash、load、adapter、rtt、install-vscode。
+init、config、open、flash、load、adapter、rtt、vscode、rustrover。
 - rtt 后面的参数原样转发给 rtt 自己的解析器（见 cli.py 的 main：在参数里找到第一个 "rtt"，其后的全部参数交给 rtt 解析器，rtt 的默认值来自已加载的配置）
 - 错误统一输出为 `tracebridge: <msg>` 到 stderr，退出码 1；Ctrl-C 退出码 130
 - `--version` 输出版本号和 git hash
@@ -195,6 +195,7 @@ id 回绕：… fe → 00 → 01
 | `dap/proxy.rs` | `dap/proxy.py` | `test_dap_proxy.py` 2 条 + 新增：restart 成功/失败、后端连不上、端口被占用 |
 | `vscode/installer.rs` + `assets/tasks.json`、`assets/launch.json` | `vscode/installer.py`、`vscode/*.json` | `test_vscode_installer.py` 的 merge、replace_tokens、install 3 条；**删掉** require_runtime_python 和 clean_toolkit 两条 |
 | `vscode/jsonc.rs` | `vscode/jsonc.py` | `test_jsonc.py` 3 条 |
+| `rustrover.rs` + `assets/rustrover.run.xml` | 新增（LSP4IJ DAPConfiguration） | 新增：生成的 XML 内容、已存在时备份后覆盖 |
 
 ## 环境变量（config.py 完整列表）
 | 变量 | 语义 | 目标字段 |
@@ -218,25 +219,36 @@ id 回绕：… fe → 00 → 01
 
 ---
 
-## 已定的实现决策（没有异议就照此执行）
+## 已定的实现决策
 1. **DAP 消息重新编码**：跟 Python 一样先解码再编码（`separators=(",",":")`、`ensure_ascii=False`），不做原样转发；serde_json 开 `preserve_order` + `arbitrary_precision` 以保持键顺序和数字。代理自己生成的响应里 `"message": null`、`"body": null` 要**显式输出**，不能省略。
 2. **DapDecoder 的非 ASCII 头部**：Python 抛出的是 UnicodeDecodeError，不属于 handle_client 捕获的异常（会变成 asyncio 未处理异常）；Rust 统一当作协议错误结束会话。
 3. **VS Code 输出格式**：`json.dumps(indent=4, ensure_ascii=False) + "\n"`，用 serde_json 的 4 空格 PrettyFormatter 实现；备份照 `shutil.copy2` 保留权限和修改时间。
 4. **locals 过滤的原因**（阶段 4 写进注释）：来自 bd20db4 "add vscode debug" 的 README——某些 t32debugadapter 版本在一些 FreeRTOS 中断栈帧上读取 Locals 会报 `Invalid letter code` 然后**退出**。代理对 locals 作用域的 `variables` 请求直接回空列表，保证适配器不崩；Watch、寄存器、调用栈、断点和单步照常转发。
 5. **clap 参数错误**保持 argparse 的行为：打印用法，退出码 2（不走 `tracebridge: <msg>` / 1 的路径）。
 6. **PowerView 工具栏**只在本工具新启动 PowerView 时安装，复用已有实例时不装（与 Python 一致）。
-7. **info 输出**保留 ANSI 颜色前缀，不判断是否 TTY（与 Python 一致）；具体前缀文字见 Q8。
+7. **info 输出**保留 ANSI 颜色前缀，不判断是否 TTY（与 Python 一致）；前缀文字见「最终决定」Q8。
 
-## 待确认问题（阶段 0 提出，确认后移到上一节）
-- **Q1 路径基准**：(a) toml 里的 `project.root` 键和 PROJECT_ROOT：我的建议是项目根固定为 toml 目录；PROJECT_ROOT 仍然支持（相对 toml 目录解析）；toml 里出现 `root` 时报错并提示删掉（避免旧配置里的 `root = ".."` 悄悄指到上一级目录）。(b) run_dir 定为 `<toml 目录>/.tracebridge/`，不跟着 PROJECT_ROOT 走。(c) `trace32.sys/binary/config/debug_adapter` 的相对路径，Python 相对 cwd，我按「所有相对路径以项目根为基准」改为相对 toml 目录。
-- **Q2 flash 期间的读超时**：Python 里只有 `cmm`（flash 脚本）用 operation_timeout，其他 `cmd` 都受 `connect_debugger` 的 5 秒 socket 超时限制。`FLASH.ReProgram OFF`（真正写 Flash 的步骤）和 `Data.LOAD.Elf` 如果超过 5 秒，Python 版会报超时。实际硬件上会遇到吗？建议 Rust 照抄 5 秒（行为一致）；如果你遇到过这个问题，可以改成 flash/load 期间用 operation_timeout。
-- **Q3 RCL 分帧的 bug**：`extract_message` 在缓冲区不足 8 字节时直接**清空**（丢掉半个帧头），在补齐字节还没收到时也会跳过（导致下一帧错位）。建议 Rust 正确缓存半包，只修这一处；msg_id 回绕、KEEPALIVE（0xFE 跟错误码 254 冲突）、"<期望就丢弃"这些协议语义照抄。
-- **Q4 connect 时的版本检查**：要不要照发 `SOFTWARE.BUILD()`、`SOFTWARE.BUILD.BASE()`，并保留最低版本检查？要不要照发 `VERSION.PYRCL(1.1.5)`（让 PowerView 以为是 pyrcl 1.1.5）？建议三条都照发，版本字符串写死 "1.1.5"，这样跟 Python 库抓到的流量逐字节一致。
-- **Q5 错误文案**：Python 的 CommandError 带三个参数，`str()` 出来是元组，比如 `TRACE32 flash failed: ('<msg>', 'command: ', b'Go')`。建议改成可读格式 `TRACE32 flash failed: <msg> (command: Go)`；其他报错文案保持一字不差。
-- **Q6 RTT `--protocol`**：Python 允许 UDP。建议保留 `--protocol`，默认 TCP；传 UDP 时报 "UDP is not supported"。
-- **Q7 RTT 的 Ctrl-C**：Python 在 RTT 循环里捕获 KeyboardInterrupt，打印 "TRACE32 RTT terminal stopped" 后**正常返回，退出码 0**。要跟 Python 一致（0），还是统一成 130？建议 0。
-- **Q8 对外文案里的旧名字**：PowerView 里的 ECHO（`trace32-vscode-bridge: flashed …`、`… symbols loaded for …`）、toolbar.cmm 里的 PRINT、`[t32]` 信息前缀、`[t32-dap-proxy]` 日志前缀要不要改名？建议前两处改成 `tracebridge:`；`[t32]` 和 `[t32-dap-proxy]` 保留（tasks.json 里后台任务的 beginsPattern/endsPattern 要匹配这两行，改名的话模板一起改）。
-- **Q9 许可证**：tracebridge 本身用什么许可证？（影响 NOTICE 和 README；RCL 移植部分无论如何都保留 MIT 声明。）
+## 最终决定（2026-09-22：Q1–Q10 由子 agent 决定，用户追加了"不再需要 VS Code tasks、希望 RustRover 也能调试"）
+- **Q1 路径基准**：项目根 = toml 所在目录。PROJECT_ROOT 保留，相对 toml 目录解析，只影响 ELF 的基准和 PowerView 的 cwd。toml 里出现 `project.root` 时报错：`project.root is no longer supported; the project root is the directory containing trace32.toml (<dir>); remove it`。run_dir 固定为 `<toml 目录>/.tracebridge/`，第一次创建时在里面写 `.gitignore`（内容 `*`）。flash.script（非 `~~`）以及 trace32.sys/binary/config/debug_adapter 的相对路径都相对 toml 目录。
+- **Q2 读超时**：t32rcl 分开设置 connect 超时和 recv 超时。flash/load 连接用 5 秒，连上后 recv 超时改为 operation_timeout（原因：`FLASH.ReProgram OFF` 才真正写 Flash，镜像大时 5 秒不够）。其他场景照旧：recv 超时 = connect 超时。
+- **Q3 分帧**：只修半包缓存（不足 8 字节的帧头、没收全的补齐字节都留在缓冲区）。msg_id 回绕、KEEPALIVE、丢弃旧响应照抄。
+- **Q4 版本检查**：三条都照发（`SOFTWARE.BUILD()`、`SOFTWARE.BUILD.BASE()`、`VERSION.PYRCL(1.1.5)`），门槛沿用 125398/126615。本机装的是 R.2026.02（base 187884，build 190766）。
+- **Q5 错误文案**：CommandError 显示为 `<msg> (command: <cmd>)`，其余文案不变。
+- **Q6 RTT**：删掉 `--protocol`。保留 `--node --port --program --symbol --cb --poll --replay --output-only`。
+- **Q7 RTT Ctrl-C**：退出码 0，stderr 打印 `TRACE32 RTT terminal stopped`，终端设置一定恢复。其他命令收到 Ctrl-C 仍按 130 退出。
+- **Q8 名字**：统一叫 tracebridge。信息前缀 `[tracebridge]`（青色）；代理日志前缀 `[tracebridge]`，就绪那一行是 `[tracebridge] adapter listening on 127.0.0.1:<dap_port> (backend <backend_port>)`；PowerView 里 ECHO `tracebridge: flashed <elf>` 和 `tracebridge: symbols loaded for <program>`；toolbar.cmm 的 PRINT 用 `tracebridge: …`；rtt 找不到控制块时提示 `Run 'tracebridge load' first, or pass --cb 0x<address>.`
+- **Q9 许可证**：MIT。LICENSE 写用户的版权；NOTICE 和 t32rcl 文件头保留 "Copyright (c) 2020 Lauterbach GmbH" 的 MIT 声明。
+- **Q10 IDE 集成**（取代原来的 install-vscode；Flash/Load/RTT 等 task **全部去掉**，这些功能直接用 CLI）：
+  - `tracebridge vscode`：合并写入 `.vscode/launch.json`（一条 `TRACE32: Attach`，`type: node`、`request: attach`、`debugServer`/`trace32Port` 是数字、`preLaunchTask: "tracebridge: adapter"`），以及 `.vscode/tasks.json` 里**唯一一个**隐藏的后台任务 `tracebridge: adapter`（command 是 exe 的绝对路径，args `["--config", "<toml 绝对路径>", "adapter"]`，beginsPattern `^\[tracebridge\] starting debug adapter`，endsPattern `^\[tracebridge\] adapter listening on 127\.0\.0\.1:<port>`）。合并规则照 merge_document，另外删掉旧版的 `T32: Flash`、`T32: Load ELF`、`T32: RTT Viewer`、`T32: Start Debug Adapter`、`T32: Flash + Debug`、`T32: Load + Debug`。写入前备份，原子写入。
+  - `tracebridge rustrover`：写 `.run/TRACE32 Attach.run.xml`（IDE 会自动识别的共享运行配置），类型是 LSP4IJ 插件的 `DAPConfiguration`（RustRover 需要先装 "LSP4IJ" 插件）。配置里 command = `<exe> --config <toml> adapter`，debugMode = LAUNCH，debugServerWaitStrategy = TRACE，debugServerReadyPattern = `adapter listening on ${address}:${port}`，launchConfiguration = `{"type":"node","request":"attach","trace32Port":<rcl_port>}`，文件映射 `*.c;*.h;*.cpp;*.hpp;*.cc;*.s;*.S;*.rs`（没有映射的文件打不了断点）。
+  - **原因**：LSP4IJ 的 LAUNCH 模式会自己启动命令，等日志匹配到就绪行后再连接，但它发出的是 `launch` 请求；ATTACH 模式则假定服务端已经在运行。因此代理新增一条改写规则（Python 版没有）：客户端发来 `launch`，且 `arguments.request == "attach"` 时，转发给后端的改成 `attach`，后端回的响应里 `command` 再改回 `launch`。VS Code 路径不受影响。
+  - adapter 启动前先检查 RCL 端口，端口不通就报错 `no PowerView on RCL port <port>; run 'tracebridge open', 'flash' or 'load' first`。dap_port 已被占用时，照 Python 打印提示后以 0 退出。
+- **其他**：
+  - init 模板：去掉 root；`program` 默认用当前目录名，`elf` 默认 `build/<名字>.elf`；保留 SR6P6 target 参数和 FreeRTOS 配置；trace32.* 留空表示自动推导；生成后打印下一步该做什么。
+  - config 输出：在原来的 ok/MISSING 列表上，加上 toml、run_dir、exe 路径和端口，以及 flash.script 是否存在；config.t32 里没有 `RCL=NETTCP`，或 `PORT=` 跟 rcl_port 对不上时打印 WARN。
+  - 启动 PowerView：config.t32 里**没有** `RCL=` 行时，追加参数 `--t32-api-rcl=TCP:<rcl_port>`；有就不加，避免冲突。
+  - 工具栏只保留 Flash / Load ELF 两个按钮。
+- **工作方式**：用户 2026-09-22 指示"决定好后直接开始项目，最后告诉我使用方法"。因此各阶段连续推进，每阶段照样执行 fmt、clippy、test 并提交，全部完成后统一汇报，附使用方法和手动验证清单。
 
 ---
 
@@ -285,7 +297,7 @@ id 回绕：… fe → 00 → 01
 - 开始前检查 RCL 端口，没有时报错，提示信息跟 cli.py 一致。连接成功后在 PowerView 里 print 一行。
 - 环形缓冲区逻辑写成纯函数，用模拟内存做单元测试，覆盖回绕、满、空、未初始化。
 
-### 阶段 6：install-vscode
+### 阶段 6：vscode / rustrover（见「最终决定」Q10）
 参考 vscode/installer.py、vscode/jsonc.py、模板和对应测试。
 - 模板嵌进二进制，占位符按「新旧差异」第 4 条修改，保留 __T32_DAP_PORT__ 和 __T32_RCL_PORT__（注意 replace_tokens：整个字符串等于占位符时替换成原始类型，端口变成数字）。
 - JSONC 读取（注释和尾逗号）、跟已有 tasks.json/launch.json 合并（规则照 merge_document，包括 TASK_ALIASES 和 LEGACY_LAUNCH_NAMES）、写入前备份、原子写入，全部跟 Python 版一致。
@@ -294,4 +306,4 @@ id 回绕：… fe → 00 → 01
 ### 阶段 7：发布
 - GitHub Actions：在 tag 上构建 aarch64-apple-darwin、x86_64-apple-darwin、x86_64-unknown-linux-musl、aarch64-unknown-linux-musl，产物是 tar.gz 加 sha256。先比较 cargo-dist 和手写 workflow，告诉我你的推荐。
 - install.sh（curl | sh，装到 ~/.local/bin）。
-- README：安装方法、快速开始（init → install-vscode → flash）、从 Python 版迁移的说明、macOS 从浏览器下载后要处理 quarantine。
+- README：安装方法、快速开始（init → config → flash → vscode 或 rustrover）、从 Python 版迁移的说明、macOS 从浏览器下载后要处理 quarantine。
