@@ -1,0 +1,62 @@
+# tracebridge configuration. This file marks the project root: tracebridge
+# finds it by searching upwards from the current directory, and every relative
+# path below is relative to the directory that contains it.
+# Environment variables (T32_SYS, ELF, T32_RCL_PORT, ...) override values here.
+
+[project]
+# Program name TRACE32 gives the loaded symbols (usually the ELF file name
+# without extension); RTT looks up \\<program>\Global\<symbol>.
+program = "__PROGRAM__"
+# The ELF image flash and load use. tracebridge does not build it.
+elf = "build/__PROGRAM__.elf"
+
+[target]
+cpu = "SR6P6"
+cores = "1."
+mem_access = "AXI"
+jtag_clock = "10MHz"
+# Run-time memory access; RTT needs it.
+dual_port = "ON"
+
+[rtos]
+# Leave config and menu empty to disable RTOS awareness.
+config = "~~/demo/arm/kernel/freertos/freertos.t32"
+menu = "~~/demo/arm/kernel/freertos/freertos.men"
+show_tasks = true
+
+[flash]
+# The project's flash script. It must support Lauterbach's PREPAREONLY
+# convention: set up the target and declare its flash, then return.
+# A normal path is relative to this file; a path starting with "~~/" is
+# resolved by TRACE32. Leave empty for RAM-only targets (use load, not flash).
+script = "flash.cmm"
+args = ["DUALPORT=1", "JTAG_CLOCK=10MHz"]
+
+[trace32]
+# TRACE32 installation (default ~/t32). Leave the others empty to derive them:
+#   host          macosx64 on macOS, linux64 on Linux
+#   binary        <sys>/bin/<host>/<executable>
+#   config        <sys>/config.t32
+#   debug_adapter <sys>/demo/env/vscode/bin/<host>/t32debugadapter
+sys = ""
+host = ""
+executable = "t32marm-qt"
+binary = ""
+config = ""
+debug_adapter = ""
+# Remote API port; must match RCL=NETTCP / PORT= in config.t32 when that file
+# enables the Remote API.
+rcl_port = 20000
+# Port the IDE connects to, and the port of t32debugadapter behind the proxy.
+dap_port = 58870
+dap_backend_port = 58871
+# Seconds to wait for t32debugadapter, and for flash/load operations.
+dap_backend_timeout = 30
+operation_timeout = 600
+
+[rtt]
+symbol = "_SEGGER_RTT"
+# Set to bypass the symbol lookup, e.g. "0x20000000".
+control_block_address = ""
+# Poll period in seconds.
+poll_interval = 0.02

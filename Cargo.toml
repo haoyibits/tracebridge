@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/t32rcl"]
+members = ["crates/t32rcl", "crates/tracebridge"]
 
 [workspace.package]
 version = "0.1.0"

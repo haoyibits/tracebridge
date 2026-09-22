@@ -1,0 +1,27 @@
+[package]
+name = "tracebridge"
+description = "Lauterbach TRACE32 PowerView from the command line, VS Code and RustRover"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "tracebridge"
+path = "src/main.rs"
+
+[dependencies]
+t32rcl = { path = "../t32rcl" }
+clap = { version = "4.6", features = ["derive"] }
+toml = "1.1"
+serde_json = { version = "1.0", features = ["preserve_order", "arbitrary_precision"] }
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tokio = { version = "1.53", features = ["rt", "net", "io-util", "process", "signal", "sync", "time", "macros"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["term", "process", "signal", "user", "fs", "poll"] }
+
+[dev-dependencies]
+tempfile = "3.27"
