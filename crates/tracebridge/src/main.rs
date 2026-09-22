@@ -8,6 +8,7 @@ mod init;
 mod powerview;
 mod pycompat;
 mod remote;
+mod rtt;
 mod t32config;
 mod target;
 mod ui;
@@ -127,6 +128,16 @@ fn run(cli: Cli) -> Result<i32> {
         Command::Flash => open(&config, Some(Action::Flash))?,
         Command::Load => open(&config, Some(Action::Load))?,
         Command::Adapter => adapter(&config)?,
+        Command::Rtt { args } => {
+            let args = rtt::parse_args(&args);
+            if !powerview::port_open(config.rcl_port) {
+                bail!(
+                    "no PowerView on RCL port {}; run 'tracebridge open', 'flash' or 'load' first",
+                    config.rcl_port
+                );
+            }
+            rtt::run(&config, args)?
+        }
         other => bail!("{} is not implemented yet", command_name(&other)),
     }
     Ok(0)
