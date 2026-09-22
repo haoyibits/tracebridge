@@ -89,7 +89,15 @@ enum Command {
 
 fn main() {
     install_interrupt_handler();
+    // Reports (config, chips, help) end quietly when the reader goes away,
+    // e.g. `tracebridge config | head`, instead of panicking on EPIPE. The
+    // long-running commands keep Rust's default of ignoring SIGPIPE: rtt must
+    // restore the terminal, and the proxy must survive a closed stdout.
+    set_sigpipe_default(true);
     let cli = Cli::parse();
+    if matches!(cli.command, Command::Rtt { .. } | Command::Adapter) {
+        set_sigpipe_default(false);
+    }
     let code = match run(cli) {
         Ok(code) => code,
         Err(error) => {
@@ -98,6 +106,24 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+fn set_sigpipe_default(default: bool) {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{SigHandler, Signal, signal};
+        let handler = if default {
+            SigHandler::SigDfl
+        } else {
+            SigHandler::SigIgn
+        };
+        // SAFETY: only the default or ignore disposition is installed.
+        unsafe {
+            let _ = signal(Signal::SIGPIPE, handler);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = default;
 }
 
 /// Ctrl-C ends the process with exit code 130 (the Python tool's

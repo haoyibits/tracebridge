@@ -28,7 +28,10 @@ fn version_includes_git_hash() {
     let output = tracebridge(dir.path(), &["--version"]);
     assert!(output.status.success());
     let text = stdout(&output);
-    assert!(text.starts_with("tracebridge 0.1.0 ("), "{text}");
+    assert!(
+        text.starts_with(&format!("tracebridge {} (", env!("CARGO_PKG_VERSION"))),
+        "{text}"
+    );
     assert!(text.trim_end().ends_with(')'), "{text}");
 }
 
@@ -108,4 +111,22 @@ fn configuration_errors_exit_with_1() {
         stderr(&output),
         "tracebridge: project.program is empty in trace32.toml\n"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn closed_stdout_ends_quietly() {
+    let dir = tempfile::tempdir().unwrap();
+    // `--help | true`: the reader exits before tracebridge writes.
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "'{}' --help | true",
+            env!("CARGO_BIN_EXE_tracebridge")
+        ))
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
 }
