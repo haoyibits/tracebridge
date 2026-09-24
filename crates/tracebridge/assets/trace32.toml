@@ -38,7 +38,11 @@ chip = ""
 # Or give the script: a path relative to this file, or a TRACE32 path
 # starting with "~~/". It wins over `chip`.
 script = ""
-args = ["DUALPORT=1", "JTAG_CLOCK=10MHz"]
+# Extra script arguments; usually none are needed. For a script chosen by chip,
+# tracebridge passes CPU=<chip> and JTAG_CLOCK=<target.jtag_clock> when the
+# script takes them, and anything else (DUALPORT=, ...) keeps the script's
+# default. Example: args = ["DUALPORT=0"]
+args = []
 
 [trace32]
 # TRACE32 installation (default ~/t32). Leave the others empty to derive them:

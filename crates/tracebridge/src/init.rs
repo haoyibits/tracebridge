@@ -69,7 +69,7 @@ mod tests {
         let config = load_config(&path, &Env::new()).unwrap();
         assert_eq!(config.program, "my_app");
         assert!(config.elf.ends_with("build/my_app.elf"));
-        assert_eq!(config.flash_args, ["DUALPORT=1", "JTAG_CLOCK=10MHz"]);
+        assert!(config.flash_args.is_empty());
         assert!(config.rtos_show_tasks);
     }
 

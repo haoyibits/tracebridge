@@ -167,6 +167,11 @@ Use the full part number (as for `SYStem.CPU`, e.g. `STM32F407VG`). TRACE32's
 scripts cover a whole family and take the derivative as `CPU=<name>`; without
 it they fall back to a default derivative. When the chosen script accepts
 `CPU=` and `flash.args` does not set it, tracebridge passes `CPU=<chip>`.
+Likewise, when the script accepts `JTAG_CLOCK=` (library scripts that set up
+the target themselves, like the modified SR6P6 one) and `target.jtag_clock` is
+set, tracebridge passes `JTAG_CLOCK=<target.jtag_clock>`, so the clock is
+configured in one place. Other arguments such as `DUALPORT=` keep the script's
+default, so `flash.args` is usually empty.
 
 ```sh
 tracebridge chips STM32H743ZI        # which script, and related ones

@@ -259,6 +259,7 @@ id 回绕：… fe → 00 → 01
   - 优先级依次为：库 > 安装目录；精确名字 > 通配符；字面部分长 > 字面部分短；片内 Flash 脚本 > `<family>-<memory>` 变体。仍然平局就报错。
   - 相关命令：`tracebridge chips <name>`、`flash --chip/--script`。实现在 `flash.rs`。
   - 按芯片名选中的脚本如果支持 `CPU=`（脚本文本里有 `"CPU="`），且 `flash.args` 里没写 `CPU=`，就自动追加 `CPU=<chip>`。原因：官方脚本按系列编写，不传 `CPU=` 会退回默认型号（例如 stm32f4xx.cmm 默认 STM32F405ZG）。
+  - 同理（2026-09-24，用户要求"需要配置的内容越少越好"）：按芯片名选中的脚本如果支持 `JTAG_CLOCK=`，`target.jtag_clock` 非空，且 `flash.args` 里没写，就自动追加 `JTAG_CLOCK=<target.jtag_clock>`，时钟只在一处配置。`DUALPORT=` 不推导：脚本参数 DUALPORT 指的是 Flash 算法的双端口下载，和 `target.dual_port`（`SYStem.Option.DUALPORT`，运行时访问内存）不是一回事，交给脚本默认值。init 模板里 `args = []`。
   - 用户的 SR6P6 脚本是从 Lauterbach FAE 那里拿到的（官方发布里没有），许可证是 "TRACE32 only"。它已复制到 `~/.config/tracebridge/flash/sr6p6.cmm`，**不得提交进仓库**。
 - **工作方式**：用户 2026-09-22 指示"决定好后直接开始项目，最后告诉我使用方法"。因此各阶段连续推进，每阶段照样执行 fmt、clippy、test 并提交，全部完成后统一汇报，附使用方法和手动验证清单。
 
