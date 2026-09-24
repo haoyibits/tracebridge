@@ -39,9 +39,8 @@ chip = ""
 # starting with "~~/". It wins over `chip`.
 script = ""
 # Extra script arguments; usually none are needed. For a script chosen by chip,
-# tracebridge passes CPU=<chip> and JTAG_CLOCK=<target.jtag_clock> when the
-# script takes them, and anything else (DUALPORT=, ...) keeps the script's
-# default. Example: args = ["DUALPORT=0"]
+# tracebridge passes CPU=<chip> when the script takes it; anything else
+# (DUALPORT=, ...) keeps the script's default. Example: args = ["DUALPORT=0"]
 args = []
 
 [trace32]

@@ -214,9 +214,8 @@ fn open(config: &Config, action: Option<Action>, env: &pycompat::Env) -> Result<
     let mut config = config.clone();
     if let Some(choice) = &choice {
         info(&format!("flash script {}", describe(choice)));
-        // Family scripts need the derivative (without CPU= they use a default
-        // one), and scripts that set up the target take the JTAG clock.
-        for argument in choice.implied_arguments(&config.flash_args, &config.jtag_clock) {
+        // Family scripts need the derivative; without CPU= they use a default one.
+        if let Some(argument) = choice.cpu_argument(&config.flash_args) {
             info(&format!("passing {argument} to the flash script"));
             config.flash_args.push(argument);
         }

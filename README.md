@@ -167,11 +167,9 @@ Use the full part number (as for `SYStem.CPU`, e.g. `STM32F407VG`). TRACE32's
 scripts cover a whole family and take the derivative as `CPU=<name>`; without
 it they fall back to a default derivative. When the chosen script accepts
 `CPU=` and `flash.args` does not set it, tracebridge passes `CPU=<chip>`.
-Likewise, when the script accepts `JTAG_CLOCK=` (library scripts that set up
-the target themselves, like the modified SR6P6 one) and `target.jtag_clock` is
-set, tracebridge passes `JTAG_CLOCK=<target.jtag_clock>`, so the clock is
-configured in one place. Other arguments such as `DUALPORT=` keep the script's
-default, so `flash.args` is usually empty.
+Other arguments such as `DUALPORT=` keep the script's default, so
+`flash.args` is usually empty. tracebridge sets `target.jtag_clock` itself
+after the script has run.
 
 ```sh
 tracebridge chips STM32H743ZI        # which script, and related ones
@@ -180,7 +178,9 @@ tracebridge flash --script ~~/demo/arm/flash/stm32h7-qspi.cmm
 ```
 
 To add a script to the library, copy it there and make sure its header has a
-`; @Chip: <name>` line:
+`; @Chip: <name>` line. When you modify an official script, keep its arguments
+(`PREPAREONLY`, `DUALPORT=`, ...) as they are, so the library copy is used
+exactly like the original:
 
 ```sh
 mkdir -p ~/.config/tracebridge/flash

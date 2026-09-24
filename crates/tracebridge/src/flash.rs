@@ -49,9 +49,6 @@ pub struct Script {
     /// The script takes the derivative as `CPU=<name>` (Lauterbach's family
     /// scripts do; without it they fall back to a default derivative).
     pub accepts_cpu: bool,
-    /// The script takes `JTAG_CLOCK=<clock>` (library scripts that set up the
-    /// target themselves, such as the modified SR6P6 script, do).
-    pub accepts_jtag_clock: bool,
 }
 
 /// How the flash script was chosen.
@@ -68,26 +65,20 @@ pub enum Choice {
 }
 
 impl Choice {
-    /// Arguments to add for a script chosen by chip, so that `flash.args` can
-    /// stay empty: `CPU=<chip>` when the script takes `CPU=`, and
-    /// `JTAG_CLOCK=<target.jtag_clock>` when it takes `JTAG_CLOCK=` and the
-    /// clock is set. An argument already in `args` is never added again.
-    pub fn implied_arguments(&self, args: &[String], jtag_clock: &str) -> Vec<String> {
-        let Choice::Chip { chip, script, .. } = self else {
-            return Vec::new();
-        };
-        let given = |key: &str| {
-            args.iter()
-                .any(|arg| arg.to_ascii_uppercase().starts_with(key))
-        };
-        let mut implied = Vec::new();
-        if script.accepts_cpu && !given("CPU=") {
-            implied.push(format!("CPU={chip}"));
+    /// `CPU=<chip>` to add to the script arguments: the script was chosen by
+    /// chip, takes `CPU=`, and `args` do not set it already.
+    pub fn cpu_argument(&self, args: &[String]) -> Option<String> {
+        match self {
+            Choice::Chip { chip, script, .. }
+                if script.accepts_cpu
+                    && !args
+                        .iter()
+                        .any(|arg| arg.to_ascii_uppercase().starts_with("CPU=")) =>
+            {
+                Some(format!("CPU={chip}"))
+            }
+            _ => None,
         }
-        if script.accepts_jtag_clock && !jtag_clock.is_empty() && !given("JTAG_CLOCK=") {
-            implied.push(format!("JTAG_CLOCK={jtag_clock}"));
-        }
-        implied
     }
 
     /// The script as passed to `DO`.
@@ -164,7 +155,6 @@ pub fn read_script(path: &Path, source: Source) -> Option<Script> {
         chips,
         prepare_only: upper.contains("PREPAREONLY"),
         accepts_cpu: upper.contains("\"CPU=\""),
-        accepts_jtag_clock: upper.contains("\"JTAG_CLOCK=\""),
     })
 }
 
@@ -342,7 +332,6 @@ mod tests {
             chips: chips.iter().map(|c| c.to_string()).collect(),
             prepare_only,
             accepts_cpu: true,
-            accepts_jtag_clock: false,
         }
     }
 
@@ -433,19 +422,6 @@ mod tests {
         assert_eq!(script.chips, ["STM32H7S*", "STM32H7R*", "STM32H750VB"]);
         assert!(script.prepare_only);
         assert!(script.accepts_cpu);
-        assert!(!script.accepts_jtag_clock);
-
-        std::fs::write(
-            &path,
-            "; @Chip: SR6P6\r\nENTRY %LINE &p\r\n\
-             &j=STRing.SCANAndExtract(\"&p\",\"JTAG_CLOCK=\",\"25MHz\")\r\n\
-             IF STRing.SCAN(\"&p\",\"PREPAREONLY\",0)!=-1\r\n",
-        )
-        .unwrap();
-        let script = read_script(&path, Source::Library).unwrap();
-        assert_eq!(script.chips, ["SR6P6"]);
-        assert!(!script.accepts_cpu);
-        assert!(script.accepts_jtag_clock);
     }
 
     fn config_with(dir: &Path) -> (Config, Env) {
@@ -524,50 +500,22 @@ mod tests {
     }
 
     #[test]
-    fn implied_arguments_are_added_only_when_useful() {
-        let chosen = |accepts_cpu, accepts_jtag_clock| Choice::Chip {
+    fn cpu_argument_is_added_only_when_useful() {
+        let chosen = |accepts_cpu| Choice::Chip {
             chip: "STM32F407VG".into(),
             pattern: "STM32F4*".into(),
             script: Script {
                 accepts_cpu,
-                accepts_jtag_clock,
                 ..script("stm32f4xx", Source::Trace32, &["STM32F4*"], true)
             },
         };
         assert_eq!(
-            chosen(true, false).implied_arguments(&["DUALPORT=1".into()], "10MHz"),
-            ["CPU=STM32F407VG"]
+            chosen(true).cpu_argument(&["DUALPORT=1".into()]),
+            Some("CPU=STM32F407VG".into())
         );
-        assert!(
-            chosen(true, false)
-                .implied_arguments(&["cpu=STM32F405RG".into()], "")
-                .is_empty()
-        );
-        assert!(
-            chosen(false, false)
-                .implied_arguments(&[], "10MHz")
-                .is_empty()
-        );
-        assert_eq!(
-            chosen(false, true).implied_arguments(&[], "10MHz"),
-            ["JTAG_CLOCK=10MHz"]
-        );
-        assert_eq!(
-            chosen(true, true).implied_arguments(&[], "10MHz"),
-            ["CPU=STM32F407VG", "JTAG_CLOCK=10MHz"]
-        );
-        // No clock configured: the script keeps its own default.
-        assert!(chosen(false, true).implied_arguments(&[], "").is_empty());
-        assert!(
-            chosen(false, true)
-                .implied_arguments(&["jtag_clock=5MHz".into()], "10MHz")
-                .is_empty()
-        );
-        assert!(
-            Choice::Explicit("x.cmm".into())
-                .implied_arguments(&[], "10MHz")
-                .is_empty()
-        );
+        assert_eq!(chosen(true).cpu_argument(&["cpu=STM32F405RG".into()]), None);
+        assert_eq!(chosen(false).cpu_argument(&[]), None);
+        assert_eq!(Choice::Explicit("x.cmm".into()).cpu_argument(&[]), None);
     }
 
     #[test]

@@ -101,7 +101,7 @@ script = ""             # 写了路径就优先用它
 
 tracebridge 按下面的顺序查找：
 
-1. **你的脚本库** `~/.config/tracebridge/flash/*.cmm`。放多个项目共用的脚本，比如 FAE 单独给的、官方发布里没有的脚本。
+1. **你的脚本库** `~/.config/tracebridge/flash/*.cmm`。放多个项目共用的脚本，比如 FAE 单独给的、官方发布里没有的脚本，或者改过的官方脚本。
 2. **TRACE32 安装目录** `<trace32.sys>/demo/*/flash/*.cmm`，里面有一千多个芯片的脚本。
 
 脚本要被选中，需要同时满足两个条件：头部有能匹配芯片名的 `; @Chip:` 行（允许通配符，如 `STM32H7*`），并且支持 `PREPAREONLY`。有多个脚本匹配时按下面的规则选：
@@ -110,7 +110,7 @@ tracebridge 按下面的顺序查找：
 - 片内 Flash 脚本（如 `stm32f4xx.cmm`）优先于外部存储的变体（`-qspi`、`-spi`、`-emmc`、`-optionbyte` 等）。
 - 以上规则分不出高下时会直接报错，这时请在 `flash.script` 里写明路径。
 
-芯片名请填完整型号，也就是 `SYStem.CPU` 用的那个名字，例如 `STM32F407VG`。官方脚本按系列编写，具体型号通过参数 `CPU=<型号>` 传入；不传的话，脚本会退回一个默认型号。所以当选中的脚本支持 `CPU=`、而 `flash.args` 里没有写时，tracebridge 会自动加上 `CPU=<芯片名>`。
+芯片名请填完整型号，也就是 `SYStem.CPU` 用的那个名字，例如 `STM32F407VG`。官方脚本按系列编写，具体型号通过参数 `CPU=<型号>` 传入；不传的话，脚本会退回一个默认型号。所以当选中的脚本支持 `CPU=`、而 `flash.args` 里没有写时，tracebridge 会自动加上 `CPU=<芯片名>`。`DUALPORT=` 等其他参数用脚本自己的默认值，所以 `flash.args` 通常留空。`target.jtag_clock` 由 tracebridge 在脚本执行完后设置。
 
 ```sh
 tracebridge chips SR6P6              # 看会选哪个脚本
@@ -118,7 +118,7 @@ tracebridge flash --chip SR6P6       # 临时指定芯片
 tracebridge flash --script <路径>    # 临时指定脚本
 ```
 
-往脚本库里加脚本：复制过去，并确认头部有一行 `; @Chip: <芯片名>`。许可证写着仅限 TRACE32 使用的脚本不要提交进公开仓库，放在脚本库里就好。
+往脚本库里加脚本：复制过去，并确认头部有一行 `; @Chip: <芯片名>`。修改官方脚本时，请保持它的参数（`PREPAREONLY`、`DUALPORT=` 等）不变，这样脚本库里的版本和原版用法完全一样。许可证写着仅限 TRACE32 使用的脚本不要提交进公开仓库，放在脚本库里就好。
 
 ## 在 IDE 里调试
 
