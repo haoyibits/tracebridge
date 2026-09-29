@@ -79,10 +79,23 @@ fn status_reads_state_without_resetting() {
 fn reg_json_output() {
     let rcl = FakeRcl::start();
     halted(&rcl);
-    function(&rcl, "PER.ADDRESS(\".CTRL\")", 0x0020, "C15:0x1001");
+    // No default PER file until PER.ReProgram (as after 'tracebridge open').
+    function(&rcl, "PER.ADDRESS(\".CTRL\")", 0x0020, "C15:0x10010");
+    function(
+        &rcl,
+        "ADDRESS.OFFSET(PER.ADDRESS(\".CTRL\"))",
+        0x0004,
+        "0x4004",
+    );
     function(&rcl, "PER.VALUE(\".CTRL\")", 0x0004, "0x70E5");
+    function(&rcl, "Data.Long(C15:0x1001)", 0x0004, "0x70E5");
     let project = Project::new(rcl.port, "");
     let output = project.run(&["debug", "reg", "CTRL", "MISSING", "--json"]);
+    assert!(
+        stderr(&output).contains("no default PER file loaded; running PER.ReProgram"),
+        "{}",
+        stderr(&output)
+    );
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let document: serde_json::Value = serde_json::from_str(stdout(&output).trim()).unwrap();
     assert_eq!(document["command"], "reg");
@@ -96,7 +109,8 @@ fn reg_json_output() {
             .starts_with("MISSING: not found in the PER file")
     );
     let commands = rcl.state().commands();
-    assert_eq!(commands, ["PER.Set.CONDitions"]);
+    assert_eq!(commands, ["PER.ReProgram", "PER.Set.CONDitions"]);
+    assert_eq!(registers[0]["address_checked"], true);
 }
 
 #[test]

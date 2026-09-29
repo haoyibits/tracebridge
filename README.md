@@ -300,10 +300,40 @@ mean on the PowerView command line. Register names are looked up with
 TRACE32's own `PER.ADDRESS()`/`PER.VALUE()` in the CPU's PER file: `HSR` is
 searched as `.HSR`, `A.B` as `.A.B` and then as a full path. Names are case
 sensitive, and path elements with spaces are quoted:
-`'"TMR (Timer Unit)".TMR_0.CTRL'` (quote the whole
-argument for the shell). Before the first PER lookup, and again after the
-debugger state changes, tracebridge runs `PER.Set.CONDitions` so that
-registers inside IF conditions of the PER file can be found.
+`'"TMR (Timer Unit)".TMR_0.CTRL'` (quote the whole argument for the shell).
+
+Before the first PER lookup, tracebridge prepares the debugger's PER state.
+Both steps change debugger state only, never the target, so they are part of
+the read-only commands:
+
+- When no default PER file is loaded (`PER.FILENAME()` is empty, as in a
+  PowerView started by `tracebridge open`), it runs `PER.ReProgram` without
+  arguments, which loads the CPU's default PER file from the TRACE32 system
+  directory, and says so.
+- It runs `PER.Set.CONDitions` so that registers inside IF conditions of the
+  PER file can be found, and again after the debugger state changes.
+
+The address `reg` prints for a register name reads the same register when
+pasted on the PowerView command line. For `C15:` registers, PER.ADDRESS()
+returns 4 × the command-line address; tracebridge prints the command-line
+form and checks it by reading `Data.Long(<address>)` back. If that read gives
+a different value, it prints PER.ADDRESS()'s own text with a note instead.
+
+**When a name does not resolve**:
+
+- *The name occurs more than once in the PER file* (TRACE32: `Ambiguous
+  keyword`). A PER file may define the same register under several trees.
+  Give the full path, or read the register by address. The error lists the
+  full paths and addresses found in the PER file, e.g.
+  `reg '"Core Registers (Core X)"."System Control".SCTLR'` or
+  `reg C15:0x1001`.
+- *TRACE32's PER functions could not resolve this entry* (internal error
+  `PAR_256`). So far this has only been seen for registers in read-only
+  `rgroup` definitions. Read them by address; the error suggests it when the
+  PER file gives one.
+
+The listed paths come from a plain text scan of the PER file (trees, groups
+and labels only). The scan is used for these messages only, never for lookups.
 
 Coprocessor (CP15) and core registers can only be read from a halted core.
 The read-only commands never halt it; they say so instead. Only `verify` uses
@@ -403,6 +433,9 @@ and Ctrl-C in `rtt` exits with status 0.
 - **`… can only be read while the core is halted`** (`debug reg`, `fault`,
   `check`): CP15 and core registers need a stopped core. Run
   `tracebridge debug break`, or `check --halt`.
+- **`debug reg <name>` fails for every name**: check the warnings about
+  `PER.ReProgram` and `PER.Set.CONDitions`. `debug eval 'PER.FILENAME()'`
+  shows which PER file PowerView uses.
 - **Timeouts during flash**: raise `trace32.operation_timeout` and look at the
   PowerView AREA window.
 - **RTT waits forever**: the firmware has not initialized RTT yet (press

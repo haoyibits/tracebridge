@@ -57,7 +57,7 @@ fn symbol_json(symbol: &Option<SymbolRef>) -> serde_json::Value {
 fn with_symbol(value: u64, symbol: &Option<SymbolRef>) -> String {
     match symbol {
         Some(symbol) => format!("{}  {}", hex32(value), symbol.describe()),
-        None => hex32(value),
+        None => format!("{}  (no symbol)", hex32(value)),
     }
 }
 
@@ -141,7 +141,9 @@ pub fn status(ctx: &mut Context) -> DResult<Outcome> {
 struct RegEntry {
     name: String,
     path: Option<String>,
-    address: Option<TargetAddress>,
+    address: Option<String>,
+    /// `Data.Long(address)` read the same register (coprocessor names only).
+    address_checked: Option<bool>,
     value: Option<u64>,
     choice: Option<String>,
     error: Option<String>,
@@ -164,13 +166,14 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
             name: name.clone(),
             path: None,
             address: None,
+            address_checked: None,
             value: None,
             choice: None,
             error: None,
         };
         let result: DResult<()> = (|| {
             if let Some(address) = TargetAddress::parse(name) {
-                entry.address = Some(address.clone());
+                entry.address = Some(address.to_string());
                 if address.is_coprocessor() && running {
                     return Err(running_error(&format!(
                         "{address} (a coprocessor register)"
@@ -179,17 +182,25 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
                 entry.value = Some(read_long(probe, &address)?);
                 return Ok(());
             }
-            let register = probe::resolve_register(probe, name)?;
+            let register = probe::resolve_register(probe, ctx.per, name)?;
             entry.path = Some(register.path.clone());
-            entry.address = Some(register.address.clone());
+            entry.address = Some(register.address.to_string());
             if register.address.is_coprocessor() && running {
                 return Err(running_error(&format!(
                     "{name} ({}, a coprocessor register)",
                     register.address
                 )));
             }
-            entry.value = Some(probe::read_register(probe, &register)?);
+            let value = probe::read_register(probe, &register)?;
+            entry.value = Some(value);
             entry.choice = probe::read_choice(probe, &register)?;
+            entry.address_checked = probe::verify_address(probe, &register, value)?;
+            if entry.address_checked == Some(false) {
+                entry.address = Some(format!(
+                    "{} (PER.ADDRESS text; no command-line address reads this register)",
+                    register.raw
+                ));
+            }
             Ok(())
         })();
         if let Err(mut error) = result {
@@ -208,11 +219,7 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
     let lines: Vec<String> = entries
         .iter()
         .map(|entry| {
-            let address = entry
-                .address
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default();
+            let address = entry.address.clone().unwrap_or_default();
             match (&entry.error, entry.value) {
                 (Some(error), _) => format!("{:<width$}  error: {error}", entry.name),
                 (None, Some(value)) => {
@@ -234,7 +241,8 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
             json!({
                 "name": e.name,
                 "path": e.path,
-                "address": e.address.as_ref().map(ToString::to_string),
+                "address": e.address,
+                "address_checked": e.address_checked,
                 "value": e.value,
                 "hex": e.value.map(hex32),
                 "choice": e.choice,
@@ -397,9 +405,21 @@ pub fn fault(ctx: &mut Context) -> DResult<Outcome> {
             hex32(hvbar)
         )),
     }
-    lines.push(format!("HSR       {}", hex32(hsr_raw.into())));
-    lines.extend(hsr.describe().into_iter().map(|line| format!("  {line}")));
-    match hsr.fault_address() {
+    // HSR = 0 would decode as "EC 0x00 unknown reason"; it means that no
+    // exception has been taken to Hyp mode.
+    let recorded = hsr_raw != 0;
+    if recorded {
+        lines.push(format!("HSR       {}", hex32(hsr_raw.into())));
+        lines.extend(hsr.describe().into_iter().map(|line| format!("  {line}")));
+    } else {
+        lines.push("HSR       0x00000000  HSR = 0: no exception recorded".into());
+    }
+    let fault_address = if recorded {
+        hsr.fault_address()
+    } else {
+        FaultAddress::None
+    };
+    match fault_address {
         FaultAddress::Hdfar => lines.push(format!(
             "HDFAR     {}  (faulting data address)",
             hex32(hdfar)
@@ -429,8 +449,9 @@ pub fn fault(ctx: &mut Context) -> DResult<Outcome> {
                 "symbol": other.symbol,
                 "slot": other.slot,
             })),
-            "hsr": hsr.to_json(),
-            "fault_address_register": match hsr.fault_address() {
+            "exception_recorded": recorded,
+            "hsr": if recorded { hsr.to_json() } else { json!({"raw": 0, "hex": "0x00000000"}) },
+            "fault_address_register": match fault_address {
                 FaultAddress::Hdfar => Some("HDFAR"),
                 FaultAddress::Hifar => Some("HIFAR"),
                 FaultAddress::None => None,
@@ -618,7 +639,7 @@ pub fn watch(ctx: &mut Context, items: &[String]) -> DResult<Outcome> {
     let mut paths = Vec::new();
     let mut errors = Vec::new();
     for name in &names {
-        match probe::resolve_register(probe, name) {
+        match probe::resolve_register(probe, ctx.per, name) {
             Ok(register) => paths.push(register.path),
             Err(error) if error.lost => return Err(error),
             Err(error) => errors.push(error.message),
@@ -699,6 +720,7 @@ mod tests {
 
     fn halted_hyp_probe() -> FakeProbe {
         FakeProbe::with(&[
+            ("PER.FILENAME()", Value::Text("perx.per".into())),
             ("SYStem.Mode()", Value::Int(11)),
             ("STATE.RUN()", Value::Bool(false)),
             ("STATE.POWER()", Value::Bool(true)),
@@ -788,6 +810,10 @@ mod tests {
             "sYmbol.NAME(P:0xF00)",
             Value::Text("\\\\app\\Global\\vectors_a".into()),
         );
+        probe.set(
+            "ADDRESS.OFFSET(sYmbol.BEGIN(\\\\app\\Global\\vectors_a))",
+            Value::Int(0xF00),
+        );
         let outcome = run(&mut probe, fault).unwrap();
         assert!(
             outcome.text.contains(
@@ -812,25 +838,38 @@ mod tests {
         assert!(probe.commands().is_empty());
     }
 
-    #[test]
-    fn reg_reads_names_fields_and_addresses() {
-        let mut probe = halted_hyp_probe();
-        probe.set("PER.ADDRESS(\".CTRL\")", Value::Text("C15:0x1001".into()));
+    /// A C15 register at c15:0x1001 as PowerView reports it: PER.ADDRESS()
+    /// text that cannot be pasted back, and an offset of 4 × the address.
+    fn c15_register(probe: &mut FakeProbe) {
+        for path in [".CTRL", ".CTRL.EN"] {
+            probe.set(
+                &format!("PER.ADDRESS(\"{path}\")"),
+                Value::Text("C15:0x10010".into()),
+            );
+            probe.set(
+                &format!("ADDRESS.OFFSET(PER.ADDRESS(\"{path}\"))"),
+                Value::Int(0x1001 * 4),
+            );
+        }
         probe.set("PER.VALUE(\".CTRL\")", Value::Int(0x1234));
-        probe.set(
-            "PER.ADDRESS(\".CTRL.EN\")",
-            Value::Text("C15:0x1001".into()),
-        );
         probe.set("PER.VALUE(\".CTRL.EN\")", Value::Int(1));
         probe.set(
             "PER.VALUE.STRING(\".CTRL.EN\")",
             Value::Text("Enabled".into()),
         );
+        probe.set("Data.Long(C15:0x1001)", Value::Int(0x1234));
+    }
+
+    #[test]
+    fn reg_reads_names_fields_and_addresses() {
+        let mut probe = halted_hyp_probe();
+        c15_register(&mut probe);
         probe.set("Data.Long(C15:0x1F12)", Value::Int(0xABCD));
         let names = ["CTRL", "CTRL.EN", "C15:0x1F12", "NOPE"].map(String::from);
         let outcome = run(&mut probe, |ctx| reg(ctx, &names)).unwrap();
         let lines: Vec<&str> = outcome.text.lines().collect();
         assert_eq!(lines[0], "CTRL        C15:0x1001        0x00001234");
+        // A field: the self-check compares with its register (.CTRL).
         assert_eq!(
             lines[1],
             "CTRL.EN     C15:0x1001        0x00000001  \"Enabled\""
@@ -838,7 +877,85 @@ mod tests {
         assert_eq!(lines[2], "C15:0x1F12  C15:0x1F12        0x0000ABCD");
         assert!(lines[3].starts_with("NOPE        error: NOPE: not found in the PER file"));
         assert_eq!(outcome.code, 1);
+        assert_eq!(outcome.json["registers"][0]["address_checked"], true);
+        assert_eq!(outcome.json["registers"][1]["address_checked"], true);
         assert_eq!(probe.commands(), ["PER.Set.CONDitions"]);
+        assert!(probe.log.contains(&"fnc Data.Long(C15:0x1001)".to_string()));
+    }
+
+    #[test]
+    fn reg_prints_the_raw_address_when_the_self_check_fails() {
+        let mut probe = halted_hyp_probe();
+        c15_register(&mut probe);
+        // The converted address reads a different register.
+        probe.set("Data.Long(C15:0x1001)", Value::Int(0x131));
+        let names = ["CTRL".to_string()];
+        let outcome = run(&mut probe, |ctx| reg(ctx, &names)).unwrap();
+        assert_eq!(
+            outcome.text,
+            "CTRL  C15:0x10010 (PER.ADDRESS text; no command-line address reads this \
+             register)  0x00001234"
+        );
+        assert_eq!(outcome.json["registers"][0]["address_checked"], false);
+        assert_eq!(outcome.code, 0);
+    }
+
+    #[test]
+    fn memory_mapped_registers_need_no_self_check() {
+        let mut probe = halted_hyp_probe();
+        probe.set("PER.ADDRESS(\".CR\")", Value::Text("AD:0x40020000".into()));
+        probe.set(
+            "ADDRESS.OFFSET(PER.ADDRESS(\".CR\"))",
+            Value::Int(0x4002_0000),
+        );
+        probe.set("PER.VALUE(\".CR\")", Value::Int(0x11A));
+        let names = ["CR".to_string()];
+        let outcome = run(&mut probe, |ctx| reg(ctx, &names)).unwrap();
+        assert_eq!(outcome.text, "CR  AD:0x40020000     0x0000011A");
+        assert!(!probe.log.iter().any(|l| l.contains("Data.Long")));
+    }
+
+    #[test]
+    fn reg_loads_the_default_per_file_first() {
+        let mut probe = halted_hyp_probe();
+        probe.values.remove("PER.FILENAME()");
+        c15_register(&mut probe);
+        let names = ["CTRL".to_string()];
+        run(&mut probe, |ctx| reg(ctx, &names)).unwrap();
+        assert_eq!(probe.commands(), ["PER.ReProgram", "PER.Set.CONDitions"]);
+        // Raw addresses need no PER file.
+        let mut probe = halted_hyp_probe();
+        probe.values.remove("PER.FILENAME()");
+        probe.set("Data.Long(C15:0x1F12)", Value::Int(1));
+        let names = ["C15:0x1F12".to_string()];
+        run(&mut probe, |ctx| reg(ctx, &names)).unwrap();
+        assert!(probe.commands().is_empty());
+    }
+
+    #[test]
+    fn fault_without_an_exception() {
+        let mut probe = halted_hyp_probe();
+        probe.set("Data.Long(C15:0x4025)", Value::Int(0));
+        // The boot ROM's ELR, far above the image's last symbol.
+        probe.set("Register(ELR_HYP)", Value::Int(0x29FB_81A1));
+        probe.set(
+            "sYmbol.NAME(P:0x29FB81A1)",
+            Value::Text("\\\\app\\Global\\__record_start".into()),
+        );
+        probe.set(
+            "ADDRESS.OFFSET(sYmbol.BEGIN(\\\\app\\Global\\__record_start))",
+            Value::Int(0x29F8_7E00),
+        );
+        let outcome = run(&mut probe, fault).unwrap();
+        let text = &outcome.text;
+        assert!(
+            text.contains("HSR       0x00000000  HSR = 0: no exception recorded"),
+            "{text}"
+        );
+        assert!(!text.contains("EC "), "{text}");
+        assert!(!text.contains("HDFAR"), "{text}");
+        assert!(text.contains("ELR_hyp   0x29FB81A1  (no symbol)"), "{text}");
+        assert_eq!(outcome.json["exception_recorded"], false);
     }
 
     #[test]

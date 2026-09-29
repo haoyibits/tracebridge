@@ -627,7 +627,7 @@ pub fn run(
             error: None,
         };
         match &check.read {
-            ReadSpec::Reg(name) => match per_check(probe::resolve_register(probe, name))? {
+            ReadSpec::Reg(name) => match per_check(probe::resolve_register(probe, per, name))? {
                 Ok(register) => {
                     item.read = format!("reg {} ({})", register.path, register.address);
                     item.register = Some(register);
@@ -766,6 +766,7 @@ mod tests {
     fn per_ready(probe: &mut FakeProbe, running: bool) {
         probe.set("SYStem.Mode()", Value::Int(11));
         probe.set("STATE.RUN()", Value::Bool(running));
+        probe.set("PER.FILENAME()", Value::Text("perx.per".into()));
     }
 
     #[test]
@@ -972,7 +973,8 @@ mod tests {
 
     fn mixed_probe(running: bool) -> FakeProbe {
         let mut probe = FakeProbe::with(&[
-            ("PER.ADDRESS(\".CTRL\")", Value::Text("C15:0x1".into())),
+            ("PER.ADDRESS(\".CTRL\")", Value::Text("C15:0x10".into())),
+            ("ADDRESS.OFFSET(PER.ADDRESS(\".CTRL\"))", Value::Int(4)),
             ("PER.VALUE(\".CTRL\")", Value::Int(0x1234)),
             ("Data.Long(AD:0x100)", Value::Int(0x2004)),
             ("sYmbol.BEGIN(table)", Value::Text("D:0x2000".into())),
@@ -1119,7 +1121,7 @@ mod tests {
         )
         .unwrap();
         assert!(report.passed());
-        assert_eq!(report.results[0].read, "reg .CTRL (C15:0x1)");
+        assert_eq!(report.results[0].read, "reg .CTRL (C15:0x0001)");
         assert!(report.results.iter().all(|r| r.value.is_none()));
         let reads: Vec<&String> = probe
             .log

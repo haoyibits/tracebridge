@@ -10,6 +10,7 @@ mod check;
 mod commands;
 mod decode;
 mod elf;
+mod perfile;
 mod probe;
 mod repl;
 
@@ -340,7 +341,7 @@ pub fn main(config: &Config, cwd: &Path, args: Vec<String>) -> Result<i32> {
                 json!({"rcl_port": config.rcl_port}),
             ));
         }
-        let mut per = PerSnapshot::default();
+        let mut per = PerSnapshot::new(Some(config.t32_sys.clone()));
         let mut ctx = Context {
             probe: &mut debugger as &mut dyn Probe,
             per: &mut per,

@@ -144,7 +144,7 @@ impl<'a, P: Probe> Session<'a, P> {
             json,
             connector,
             probe: Some(probe),
-            per: PerSnapshot::default(),
+            per: PerSnapshot::new(Some(config.t32_sys.clone())),
         }
     }
 

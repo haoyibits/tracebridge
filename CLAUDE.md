@@ -279,7 +279,8 @@ id 回绕：… fe → 00 → 01
 | 5 rtt | ✅ 含 pty 下的终端模式测试 | 4513680 |
 | 6 vscode/rustrover | ✅ | 67bc952 |
 | 7 发布 | ✅ 手写 workflow（理由见下） | 见 git log |
-| 8 debug 会话 + flash 先 Down | ✅ 离线测试；硬件待验（验收表在本地的 tracebridge-debug-prompt.md 里） | 见 git log |
+| 8 debug 会话 + flash 先 Down | ✅ 2026-09-29 在 SR6P6 上跑完验收表（0a6ce79），全部通过 | 见 git log |
+| 8.1 debug 硬件反馈修复 | ✅ 离线测试；待硬件复测（PER.ReProgram、C15 地址、rgroup、fault 无异常） | 见 git log |
 
 **debug 的决定**（2026-09-29，任务说明是本地文件 `tracebridge-debug-prompt.md`，里面有项目数据，不提交；用户让我自己定这些点）：
 - 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`。
@@ -291,6 +292,12 @@ id 回绕：… fe → 00 → 01
 - `attach` 复用 `target::attach_commands`（和 load 相同，不复位）；系统已经 Up 时什么都不做。
 - 退出码：0 正常，1 错误（包括寄存器找不到），2 用法错误，3 check 失败或 verify 有差异。
 - flash：`SYStem.Up()` 为真时先 `SYStem.Down`（`target::program`）。load 不这样做：load 不在目标上运行代码，它的用途就是在不复位的前提下挂到正在运行的程序上。
+- **硬件反馈的修复**（2026-09-29，第 8.1 阶段）：
+  - 在第一个 PER 函数之前，`PER.FILENAME()` 为空或调用失败就执行不带参数的 `PER.ReProgram`，并在 stderr 说明。`tracebridge open` 启动的 PowerView 没有默认 PER 文件。这一步只改调试器状态，所以放在 R 命令的隐式准备里，和 `PER.Set.CONDitions` 一样。
+  - C15 地址：PER.ADDRESS() 的偏移是命令行地址的 4 倍（HVBAR c15:0x400C → 0x10030），它自己的文本（`C15:0x400C0`）不能直接粘贴到命令行。因此按"偏移 ÷ 4、访问类别不变"输出。C14 没有在硬件上确认过，不做换算。`reg` 会用 `Data.Long(<输出的地址>)` 自检，和寄存器的值比较；如果是字段，就和父路径解析到同一地址的那个寄存器的值比较。自检不通过时，输出 PER.ADDRESS 的原始文本并附说明。只有协处理器类别才做自检，内存映射的地址不需要换算。
+  - **PER 文件扫描**（`debug/perfile.rs`）：**只用于生成报错信息**，查找仍然全部交给 PER.ADDRESS/PER.VALUE，所以没有推翻"不写 PER 解析器"那条决定。扫描只处理 `tree`/`tree.open`/`tree.close`/`tree.end`、字面量 `base`、`*group` 和 `line.*` 标签，不解释 `sif`/`if`。对有歧义的名字，列出完整路径和地址；遇到 PAR_256（目前只在 rgroup 上见过），给出可以直接按地址读的写法。文件位置由 `PER.FILENAME()` 加上 `trace32.sys` 得出。
+  - `symbolize`：地址必须落在 `sYmbol.BEGIN..=sYmbol.END` 之内。符号没有大小时，只有偏移小于 0x100 才显示 symbol+offset，否则显示 "(no symbol)"，因为 sYmbol.NAME() 会给出下方最近的符号，哪怕隔得很远。
+  - `fault`：HSR = 0 时显示 "no exception recorded"，不再解码 EC。
 
 **发布方案：手写 GitHub Actions，不用 cargo-dist。** 只有 4 个目标，产物就是 tar.gz 和 sha256，安装位置要求 `~/.local/bin`。cargo-dist 会生成它自己的安装器（默认装到 `~/.cargo/bin`），还要引入 dist 配置和每次重新生成的 workflow，收益小于维护成本。Linux 两个 musl 目标都在对应架构的原生 runner 上构建（ubuntu-24.04 / ubuntu-24.04-arm + musl-tools），不需要 cross；macOS 两个目标都在 macos-14 上构建。
 
