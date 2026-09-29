@@ -57,9 +57,10 @@ fn flash_runs_the_project_script_then_programs() {
     let root = project.root();
     let log = rcl.state().log.clone();
     let script = root.join("flash.cmm");
-    assert_eq!(log[0], "fnc PRACTICE.SD()");
+    assert_eq!(log[0], "fnc SYStem.Up()");
+    assert_eq!(log[1], "fnc PRACTICE.SD()");
     assert_eq!(
-        log[1],
+        log[2],
         format!("cmd DO \"{}\" PREPAREONLY", script.display())
     );
     let commands = rcl.state().commands();
@@ -71,6 +72,24 @@ fn flash_runs_the_project_script_then_programs() {
         .unwrap();
     assert_eq!(commands[load + 1], "FLASH.ReProgram OFF");
     assert!(stdout(&output).contains("flashed, symbols loaded, target running"));
+}
+
+#[test]
+fn flash_takes_an_up_system_down_before_the_script() {
+    let rcl = FakeRcl::start();
+    rcl.state().system_up = true;
+    let project = Project::new(rcl.port, "");
+    let output = project.run(&["flash"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let log = rcl.state().log.clone();
+    assert_eq!(log[0], "fnc SYStem.Up()");
+    assert_eq!(log[1], "cmd SYStem.Down");
+    assert!(log[3].starts_with("cmd DO "), "{log:?}");
+    assert!(
+        stdout(&output).contains("target is up: SYStem.Down first"),
+        "{}",
+        stdout(&output)
+    );
 }
 
 #[test]
@@ -135,7 +154,7 @@ fn flash_script_is_chosen_by_chip_from_the_library() {
         stdout(&output)
     );
     assert_eq!(
-        rcl.state().log[1],
+        rcl.state().log[2],
         format!(
             "cmd DO \"{}\" PREPAREONLY CPU=MYCHIP-A",
             library.join("board.cmm").display()

@@ -92,6 +92,8 @@ Day to day:
    **Load ELF** buttons to the PowerView toolbar.
 3. Debug from the IDE (below), or use PowerView directly.
 4. `tracebridge rtt` for the target's RTT console.
+5. `tracebridge debug` to check registers, memory, faults and whether the
+   board runs the ELF you built, without resetting it.
 
 ## Configuration
 
@@ -129,7 +131,11 @@ Runtime files (the PowerView log, the toolbar script) are written to
 
 `tracebridge flash` needs a flash script that supports Lauterbach's
 `PREPAREONLY` convention: set up the target, declare the flash, and return
-without programming. tracebridge then runs:
+without programming. When the system is already up, tracebridge first runs
+`SYStem.Down`: flash scripts reset and initialize the chip only when the
+system is down, and otherwise run the flash algorithm in whatever state the
+application left (for example with an MPU that makes the algorithm's RAM
+execute-never). After the script, tracebridge runs:
 
 ```text
 FLASH.ReProgram ALL /Erase
@@ -244,6 +250,126 @@ Channel 0 is used in both directions, through TRACE32 run-time memory access
 (`dual_port = "ON"`). The terminal switches to character-at-a-time input and
 restores its settings on exit.
 
+## Inspecting the target: `tracebridge debug`
+
+`tracebridge debug` reads registers, memory and fault state through the
+PowerView that is already running, over the Remote API. It **never resets the
+target**: connecting issues no `SYStem.Up`, `SYStem.Mode Go` or reset, and it
+does not start PowerView (run `tracebridge open`, `flash` or `load` first).
+
+```sh
+tracebridge debug                       # interactive session
+tracebridge debug status                # one command, then exit
+tracebridge debug reg HSR HSCTLR.C C15:0x4025
+tracebridge debug mem my_buffer 8 --json
+```
+
+The session has line editing, history (`.tracebridge/debug_history`), Tab
+completion of command names, and a prompt that shows the debugger state
+(`t32 [up, halted]>`, `t32 [down]>`). A failing command does not end the
+session; after a lost connection, `reconnect` connects again.
+
+`--json` prints one JSON document per command. Exit codes: 0 ok, 1 error
+(including register not found), 2 usage, 3 a check failed or `verify` found a
+difference.
+
+| Command | Kind | What it does |
+|---|---|---|
+| `status` | R | Debugger mode, run state, power, CPU; when halted, PC with symbol+offset and the decoded CPSR |
+| `reg <name\|address>…` | R | Registers by PER-file name (`HSR`), field (`HSCTLR.C`, also prints the BITFLD choice), full PER path, or raw address (`C15:0x4025`, `AD:0x40000000`) |
+| `mem <address\|symbol> [count]` | R | `count` 32-bit words (default 1) as a hex dump |
+| `fault` | R | AArch32 Hyp fault report: vector slot (also when PC is in a table other than the one HVBAR points at), HSR decoded, HDFAR or HIFAR, ELR_hyp with symbol, SPSR_hyp |
+| `eval <expression>` | R | The value of any PRACTICE expression |
+| `verify [elf] [--t32]` | R | Does target memory hold the ELF's loadable content? |
+| `check <file> [--variant V] [--dry-run]` | R | Data-driven acceptance check (below) |
+| `check <file> --halt` | **S** | The same, but stops the core first when checks read CP15 or core registers |
+| `watch <file\|name…>` | UI | A PER.Watch window with exactly these registers (PowerView build 176763, 09/2025, or newer) |
+| `attach` | S | `SYStem.Mode Attach`: no reset; the core keeps running or stays halted. PowerView then reports mode "up" |
+| `down` | S | `SYStem.Down` |
+| `break`, `go` | S | Halt or resume the core |
+| `cmd <PRACTICE command>` | S | Runs **any** command, including reset and flash |
+| `help [command]`, `reconnect`, `quit` | | Session commands |
+
+There is no `up`, `reset` or `flash` in the session; use the top-level
+commands for those.
+
+**How values are read.** Everything is evaluated by PowerView as PRACTICE
+functions (`Data.Long(...)`, `Register(...)`, `PER.VALUE(...)`,
+`sYmbol.BEGIN(...)`), so addresses and access classes mean exactly what they
+mean on the PowerView command line. Register names are looked up with
+TRACE32's own `PER.ADDRESS()`/`PER.VALUE()` in the CPU's PER file: `HSR` is
+searched as `.HSR`, `A.B` as `.A.B` and then as a full path. Names are case
+sensitive, and path elements with spaces are quoted:
+`'"TMR (Timer Unit)".TMR_0.CTRL'` (quote the whole
+argument for the shell). Before the first PER lookup, and again after the
+debugger state changes, tracebridge runs `PER.Set.CONDitions` so that
+registers inside IF conditions of the PER file can be found.
+
+Coprocessor (CP15) and core registers can only be read from a halted core.
+The read-only commands never halt it; they say so instead. Only `verify` uses
+the raw memory API, and only for plain memory (`AD:`).
+
+**`verify`** compares every `PT_LOAD` segment with file content at its load
+address (LMA, `p_paddr`), not its run address, so initialized data that the
+startup code copies to RAM is compared in NVM. It prints `match`, or the first
+differing address and the number of differing bytes. `--t32` also runs
+TRACE32's own comparison (`Data.LOAD.Elf <elf> /DIFF /PHYSLOAD /NoRegister
+/NosYmbol /NoClear`, which changes neither memory, PC nor the loaded symbols)
+and reports whether the two agree.
+
+**`check`** runs a TOML file that lives in your project. tracebridge contains
+no board facts. [`docs/check-example.toml`](docs/check-example.toml) shows
+every form:
+
+```toml
+description = "Boot acceptance"
+
+[[check]]
+name = "system control"
+read = { reg = "SCTRL" }                 # or addr = "AD:0x...", core = "PC", expr = "..."
+expect = { eq = 0x00C50078 }             # eq/ne (+ mask), nonzero, range, in_symbol, one_of
+variants = ["debug"]                     # optional: only with --variant debug
+```
+
+`eq`, `ne` and `one_of` accept `"sym:<name>[+offset]"` in place of a number.
+The output is one line per check and a summary. `--dry-run` resolves every
+register name (`PER.ADDRESS`) and symbol but reads no register or memory
+value, so it also works while the core runs (only `PER.Set.CONDitions`
+evaluates the PER file's conditions). When a check reads CP15 or core registers and the core is
+running, `check` stops with an error unless `--halt` is given; with `--halt`,
+it runs `Break`, says so, and leaves the core halted (`tracebridge debug go`
+resumes it).
+
+### Allowing only the read-only commands (Claude Code)
+
+The R commands have no side effects, so an AI assistant can run them without
+asking. In the project's `.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(tracebridge debug status:*)",
+      "Bash(tracebridge debug reg:*)",
+      "Bash(tracebridge debug mem:*)",
+      "Bash(tracebridge debug fault:*)",
+      "Bash(tracebridge debug eval:*)",
+      "Bash(tracebridge debug verify:*)",
+      "Bash(tracebridge debug check checks/boot.toml)",
+      "Bash(tracebridge debug check checks/boot.toml --dry-run)",
+      "Bash(tracebridge debug check checks/boot.toml --variant release)"
+    ]
+  }
+}
+```
+
+`check` is allowed with **exact** command lines rather than a `:*` prefix: a
+prefix rule would also allow `check … --halt`, which stops the core. `watch`
+(UI) only opens a PowerView window and may be added too. Everything else
+(`attach`, `down`, `break`, `go`, `cmd`, `check --halt`, `flash`, `load`) then
+still asks. For these rules to match, run the commands inside the project
+(no `--config` before `debug`) and put `--json` after the command's arguments.
+
 ## Migrating from the Python trace32-bridge
 
 1. Install tracebridge. Python and `lauterbach-trace32-rcl` are no longer
@@ -273,7 +399,10 @@ and Ctrl-C in `rtt` exits with status 0.
 - **PowerView does not become ready**: check `tracebridge config` (it warns
   about `RCL=`/`PORT=` mismatches) and `.tracebridge/powerview.log`.
 - **`no PowerView on RCL port …`**: start it with `tracebridge open`, `flash`
-  or `load` before `rtt` or the debugger.
+  or `load` before `rtt`, `debug` or the IDE debugger.
+- **`… can only be read while the core is halted`** (`debug reg`, `fault`,
+  `check`): CP15 and core registers need a stopped core. Run
+  `tracebridge debug break`, or `check --halt`.
 - **Timeouts during flash**: raise `trace32.operation_timeout` and look at the
   PowerView AREA window.
 - **RTT waits forever**: the firmware has not initialized RTT yet (press

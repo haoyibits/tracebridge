@@ -11,6 +11,7 @@
 
 mod config;
 mod dap;
+mod debug;
 mod errors;
 mod flash;
 mod init;
@@ -94,6 +95,13 @@ enum Command {
         /// Chip name or part of it, e.g. SR6P6 or STM32H743ZI (default: flash.chip or target.cpu)
         query: Option<String>,
     },
+    /// Inspect registers, memory and faults in the running PowerView; never resets
+    /// the target (see 'tracebridge debug --help')
+    #[command(disable_help_flag = true)]
+    Debug {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
 }
 
 fn main() {
@@ -129,6 +137,13 @@ fn run(cli: Cli) -> Result<i32> {
         return Ok(0);
     }
 
+    // Help and usage errors of 'debug' need no configuration.
+    if let Command::Debug { args } = &cli.command {
+        if let Some(code) = debug::main_without_config(args) {
+            return Ok(code);
+        }
+    }
+
     let env = pycompat::process_env();
     let config_file = find_config_file(cli.config.as_deref(), &cwd, &env)?;
     let mut config = load_config(&config_file, &env)?;
@@ -148,6 +163,7 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Command::Load => open(&config, Some(Action::Load), &env)?,
         Command::Chips { query } => chips(&config, query.as_deref(), &env)?,
+        Command::Debug { args } => return debug::main(&config, &cwd, args),
         Command::Adapter => adapter(&config)?,
         Command::Rtt { args } => {
             let args = rtt::parse_args(&args);

@@ -20,6 +20,7 @@ serde_json = { version = "1.0", features = ["preserve_order", "arbitrary_precisi
 thiserror = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1.53", features = ["rt", "net", "io-util", "process", "signal", "sync", "time", "macros"] }
+rustyline = { version = "18.0", default-features = false, features = ["with-file-history"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["term", "process", "signal", "user", "fs", "poll"] }

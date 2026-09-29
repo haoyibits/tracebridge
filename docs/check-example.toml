@@ -1,0 +1,70 @@
+# Example check file for 'tracebridge debug check'.
+#
+# Register names, addresses and values here are made up. Keep your real check
+# files in your project repository; tracebridge only executes them:
+#
+#   tracebridge debug check checks/boot.toml --variant release
+#   tracebridge debug check checks/boot.toml --dry-run     # resolve names only
+#
+# Integers may be written in hex. "sym:<name>[+offset]" is a symbol address.
+
+description = "Boot acceptance (example)"
+
+# A register by its PER-file name (PER.VALUE(".SCTRL")).
+[[check]]
+name = "system control"
+read = { reg = "SCTRL" }
+expect = { eq = 0x00C5_0078 }
+
+# Only some bits matter: compare (value & mask).
+[[check]]
+name = "cache enable bits"
+read = { reg = "SCTRL" }
+expect = { eq = 0x1004, mask = 0x1004 }
+
+# A field of a register (PER.VALUE(".TIMER_CTRL.EN")).
+[[check]]
+name = "timer enabled"
+read = { reg = "TIMER_CTRL.EN" }
+expect = { eq = 1 }
+
+# A raw address, read with Data.Long(); this also covers CP15 addresses
+# such as C15:0x0000 (which need a halted core).
+[[check]]
+name = "boot record magic"
+read = { addr = "AD:0x20000000" }
+expect = { eq = 0xB007_0001 }
+
+[[check]]
+name = "boot record pointer"
+read = { addr = "AD:0x20000008" }
+expect = { eq = "sym:boot_record+0x10" }
+
+# A core register (Register(PC)).
+[[check]]
+name = "stopped in the idle loop"
+read = { core = "PC" }
+expect = { in_symbol = "idle_loop" }
+
+# Any PRACTICE expression.
+[[check]]
+name = "heap end is set"
+read = { expr = "Data.Long(sYmbol.BEGIN(heap_end))" }
+expect = { nonzero = true }
+
+[[check]]
+name = "clock divider in range"
+read = { reg = "CLK_DIV" }
+expect = { range = [1, 8] }
+
+[[check]]
+name = "vector base"
+read = { reg = "VBAR" }
+expect = { one_of = ["sym:vectors", "sym:vectors_ram"] }
+
+# Runs only with --variant debug or --variant trace.
+[[check]]
+name = "debug UART enabled"
+read = { reg = "UART0_CR.UARTEN" }
+expect = { eq = 1 }
+variants = ["debug", "trace"]

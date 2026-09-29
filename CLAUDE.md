@@ -72,6 +72,7 @@ cargo workspace：
 | shlex | `flash.args` 为字符串时、T32_FLASH_ARGS | **倾向自己移植** Python `shlex.split`（posix=True，comments=False）；阶段 2 用对照测试确认 shlex crate 对 `#` 等字符的处理是否一致，不一致就自己写 |
 | tempfile（dev） | 测试 | |
 | build.rs | `--version` 的 git hash | 调 `git rev-parse --short HEAD`，失败时用 "unknown"，不引入额外 crate |
+| rustyline（`default-features = false`，`with-file-history`） | `debug` 交互会话 | 行编辑、历史、命令名补全；非 TTY 时退化为逐行读取，所以会话能用管道测试。ELF 只读 program header，约 80 行，自己写（`debug/elf.rs`），不引入 object/goblin |
 
 需要照 Python 标准库语义自己移植的小函数（集中放在 `pycompat.rs`，各自有单测）：
 - `os.path.expanduser` + `os.path.expandvars`（`$VAR`、`${VAR}`，未定义的变量原样保留；读的是真实进程环境，不是注入的 env）
@@ -278,6 +279,18 @@ id 回绕：… fe → 00 → 01
 | 5 rtt | ✅ 含 pty 下的终端模式测试 | 4513680 |
 | 6 vscode/rustrover | ✅ | 67bc952 |
 | 7 发布 | ✅ 手写 workflow（理由见下） | 见 git log |
+| 8 debug 会话 + flash 先 Down | ✅ 离线测试；硬件待验（验收表在本地的 tracebridge-debug-prompt.md 里） | 见 git log |
+
+**debug 的决定**（2026-09-29，任务说明是本地文件 `tracebridge-debug-prompt.md`，里面有项目数据，不提交；用户让我自己定这些点）：
+- 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`。
+- 读取一律在 PowerView 端求值（`Data.Long`、`Register`、`PER.VALUE`、`sYmbol.*`）；只有 `verify` 用原始内存 API，而且只读 `AD:`。
+- `PER.Set.CONDitions`：第一次用 PER 函数前、S 命令之后、调试器状态（`SYStem.Mode()`、`STATE.RUN()`）变化后、核在运行时，每次都重新快照。失败只警告。
+- `verify` 默认自己比较（PT_LOAD、`p_paddr`、`AD:`），因为只有这样才能数出差异字节数；手册说 `Data.LOAD.Elf` 默认按 `p_paddr` 加载（`/LOGLOAD` 才改用 `p_vaddr`），`--t32` 额外跑 `/DIFF /PHYSLOAD /NoRegister /NosYmbol /NoClear` 做对照。
+- `check --halt` 执行 Break 后让核保持停止，并提示用 `go` 恢复；`core` 读取也算"需要停核"。
+- `fault` 在核运行时直接报错，不停核；`CPUIS64BIT()` 为真时报"不是 AArch32"。另一张向量表按"PC 所在符号的起始地址 32 字节对齐、偏移 < 0x20"判断。
+- `attach` 复用 `target::attach_commands`（和 load 相同，不复位）；系统已经 Up 时什么都不做。
+- 退出码：0 正常，1 错误（包括寄存器找不到），2 用法错误，3 check 失败或 verify 有差异。
+- flash：`SYStem.Up()` 为真时先 `SYStem.Down`（`target::program`）。load 不这样做：load 不在目标上运行代码，它的用途就是在不复位的前提下挂到正在运行的程序上。
 
 **发布方案：手写 GitHub Actions，不用 cargo-dist。** 只有 4 个目标，产物就是 tar.gz 和 sha256，安装位置要求 `~/.local/bin`。cargo-dist 会生成它自己的安装器（默认装到 `~/.cargo/bin`），还要引入 dist 配置和每次重新生成的 workflow，收益小于维护成本。Linux 两个 musl 目标都在对应架构的原生 runner 上构建（ubuntu-24.04 / ubuntu-24.04-arm + musl-tools），不需要 cross；macOS 两个目标都在 macos-14 上构建。
 
@@ -300,6 +313,8 @@ id 回绕：… fe → 00 → 01
 9. **RustRover**：装好 LSP4IJ 后执行 `tracebridge rustrover`，确认运行配置出现，Debug 能启动代理并连上，`.c` 文件里能打断点。**serverMappings 的 XML 格式是按 IntelliJ 序列化规则推断的**，如果不生效，就在 Mappings 页手动添加文件名模式。
 10. **RTT**：在真实目标上检查输出、键盘输入，Ctrl-C 后终端恢复正常。
 11. **发布**：推一个 tag，检查 4 个产物和 sha256。确认仓库名 `haoyibits/tracebridge`（install.sh 和 README 里的默认值是按 git 作者名假设的），再用 install.sh 从 GitHub 安装一次。
+12. **debug**：`tracebridge-debug-prompt.md` 里的硬件验收表，以及其中 5 条未确认事项（PER 路径解析、字段名匹配、歧义报告、`SYStem.Mode()` 编码、`/DIFF` 按 LMA 比较）。
+13. **flash 先 Down**：PowerView 处于 Up、核停在应用里时执行 `tracebridge flash`，应该打印 `target is up: SYStem.Down first`，并且烧录成功。
 
 ### 阶段 0：通读和规划 ✅（本文档）
 

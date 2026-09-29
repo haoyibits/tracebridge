@@ -21,6 +21,8 @@ pub struct State {
     pub symbols: HashMap<String, u64>,
     /// Commands (by prefix) that fail with T32_ERR_FN1.
     pub failing: Vec<String>,
+    /// Extra function answers: expression → (result type, text).
+    pub functions: HashMap<String, (u32, String)>,
 }
 
 impl State {
@@ -155,7 +157,20 @@ fn answer(state: &Mutex<State>, data: &[u8]) -> Vec<u8> {
                 "SYStem.Up()" => function_answer(id, 0x0001, bool_text(state.system_up)),
                 "STATE.RUN()" => function_answer(id, 0x0001, bool_text(state.state_run)),
                 "PRACTICE.SD()" => function_answer(id, 0x0008, "0."),
-                other => panic!("unexpected function {other}"),
+                other => match state.functions.get(other) {
+                    Some((result_type, value)) => function_answer(id, *result_type, value),
+                    None if other.starts_with("SYStem.Mode()") => {
+                        let mode = if state.system_up { "0xB" } else { "0x0" };
+                        function_answer(id, 0x0004, mode)
+                    }
+                    None => {
+                        let message = "function failed";
+                        let mut answer = vec![90, id, 0, 0, 0, 0];
+                        answer.extend_from_slice(&(message.len() as u32).to_le_bytes());
+                        answer.extend_from_slice(message.as_bytes());
+                        answer
+                    }
+                },
             }
         }
         (0x74, 0x35) => {

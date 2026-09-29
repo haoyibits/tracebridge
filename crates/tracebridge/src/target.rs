@@ -9,6 +9,7 @@ use crate::flash::{self, Choice};
 use crate::powerview::require_file;
 use crate::pycompat::Env;
 use crate::remote::{CONNECT_TIMEOUT, Rcl, connect_debugger};
+use crate::ui::info;
 use crate::{bail, bridge_error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +86,15 @@ pub fn run_sequence(config: &Config, script: Option<&str>, debugger: &mut impl R
 /// `program`: run the project's flash script in PREPAREONLY mode, then erase,
 /// program and verify through FLASH.ReProgram.
 pub fn program(config: &Config, script: &str, debugger: &mut impl Rcl) -> t32rcl::Result<()> {
+    // Flash scripts reset and initialise the chip only inside `IF !SYStem.Up()`.
+    // When the system is already up, the flash algorithm runs from RAM in the
+    // state the application left, e.g. with an MPU that makes that RAM
+    // execute-never, and fails. Every flash therefore starts from the script's
+    // own reset.
+    if debugger.system_up()? {
+        info("target is up: SYStem.Down first, so the flash script starts from its own reset");
+        debugger.cmd("SYStem.Down")?;
+    }
     let mut command = format!("\"{script}\" PREPAREONLY");
     if !config.flash_args.is_empty() {
         command.push(' ');
@@ -115,20 +125,29 @@ pub fn program(config: &Config, script: &str, debugger: &mut impl Rcl) -> t32rcl
     debugger.print(&format!("tracebridge: flashed {}", config.elf.display()))
 }
 
+/// The commands that attach to a target whose system is not up, without a
+/// reset: the core keeps running or stays halted.
+pub fn attach_commands(config: &Config) -> Vec<String> {
+    let mut commands = vec!["SYStem.Mode Down".to_string()];
+    if !config.cpu.is_empty() {
+        commands.push(format!("SYStem.CPU {}", config.cpu));
+    }
+    if !config.mem_access.is_empty() {
+        commands.push(format!("SYStem.MemAccess {}", config.mem_access));
+    }
+    if !config.cores.is_empty() {
+        commands.push(format!("CORE.ASSIGN {}", config.cores));
+    }
+    commands.push("SYStem.Mode Attach".into());
+    commands
+}
+
 /// `setup_debug`: attach if needed, load symbols, enable RTOS awareness and run.
 pub fn setup_debug(config: &Config, debugger: &mut impl Rcl) -> t32rcl::Result<()> {
     if !debugger.system_up()? {
-        debugger.cmd("SYStem.Mode Down")?;
-        if !config.cpu.is_empty() {
-            debugger.cmd(&format!("SYStem.CPU {}", config.cpu))?;
+        for command in attach_commands(config) {
+            debugger.cmd(&command)?;
         }
-        if !config.mem_access.is_empty() {
-            debugger.cmd(&format!("SYStem.MemAccess {}", config.mem_access))?;
-        }
-        if !config.cores.is_empty() {
-            debugger.cmd(&format!("CORE.ASSIGN {}", config.cores))?;
-        }
-        debugger.cmd("SYStem.Mode Attach")?;
     }
 
     debugger.cmd(&format!(
@@ -323,6 +342,8 @@ pub mod tests {
         assert_eq!(
             recorder.calls,
             [
+                "system_up".to_string(),
+                "cmd SYStem.Down".into(),
                 format!("cmm \"{script}\" PREPAREONLY DUALPORT=1 X=2 Some(1s)"),
                 "cmd SYStem.JtagClock 10MHz".into(),
                 "cmd FLASH.ReProgram ALL /Erase".into(),
@@ -339,6 +360,31 @@ pub mod tests {
                 "cmd List.auto".into(),
                 "state_run".into(),
                 "print tracebridge: symbols loaded for demo".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn flash_from_a_down_system_starts_with_the_script() {
+        let (_dir, config) = fixture();
+        let mut recorder = Recorder::default();
+        program(&config, "flash.cmm", &mut recorder).unwrap();
+        assert_eq!(recorder.calls[0], "system_up");
+        assert!(recorder.calls[1].starts_with("cmm \"flash.cmm\" PREPAREONLY"));
+    }
+
+    #[test]
+    fn attach_commands_never_reset() {
+        let (_dir, mut config) = fixture();
+        config.mem_access = "DAP".into();
+        assert_eq!(
+            attach_commands(&config),
+            [
+                "SYStem.Mode Down",
+                "SYStem.CPU CPU",
+                "SYStem.MemAccess DAP",
+                "CORE.ASSIGN 1.",
+                "SYStem.Mode Attach"
             ]
         );
     }
