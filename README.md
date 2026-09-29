@@ -306,34 +306,46 @@ Before the first PER lookup, tracebridge prepares the debugger's PER state.
 Both steps change debugger state only, never the target, so they are part of
 the read-only commands:
 
-- When no default PER file is loaded (`PER.FILENAME()` is empty, as in a
-  PowerView started by `tracebridge open`), it runs `PER.ReProgram` without
-  arguments, which loads the CPU's default PER file from the TRACE32 system
-  directory, and says so.
 - It runs `PER.Set.CONDitions` so that registers inside IF conditions of the
   PER file can be found, and again after the debugger state changes.
+- When that, or any PER lookup, fails with "No default peripheral file" (as in
+  a PowerView started by `tracebridge open`), it runs `PER.ReProgram` without
+  arguments, which loads the CPU's default PER file from the TRACE32 system
+  directory, says so, and retries. It does this at most once per connection.
+  `PER.FILENAME()` cannot tell whether the file is loaded: it names the CPU's
+  PER file either way.
 
 The address `reg` prints for a register name reads the same register when
-pasted on the PowerView command line. For `C15:` registers, PER.ADDRESS()
-returns 4 × the command-line address; tracebridge prints the command-line
-form and checks it by reading `Data.Long(<address>)` back. If that read gives
-a different value, it prints PER.ADDRESS()'s own text with a note instead.
+pasted on the PowerView command line. For `C15:` and `C14:` registers,
+PER.ADDRESS() returns 4 × the command-line address, so tracebridge prints the
+command-line form and checks it by reading `Data.Long(<address>)` back:
 
-**When a name does not resolve**:
+- If the read gives a different value, or fails (for example with a bus
+  error), `reg` prints PER.ADDRESS()'s own text with a note instead.
+- A value of 0 or 0xFFFFFFFF cannot confirm an address, because a wrong
+  address often reads the same. The address is then marked "unconfirmed".
 
-- *The name occurs more than once in the PER file* (TRACE32: `Ambiguous
-  keyword`). A PER file may define the same register under several trees.
-  Give the full path, or read the register by address. The error lists the
-  full paths and addresses found in the PER file, e.g.
-  `reg '"Core Registers (Core X)"."System Control".SCTLR'` or
-  `reg C15:0x1001`.
-- *TRACE32's PER functions could not resolve this entry* (internal error
-  `PAR_256`). So far this has only been seen for registers in read-only
-  `rgroup` definitions. Read them by address; the error suggests it when the
-  PER file gives one.
+With `--json`, `address_check` is `confirmed`, `unconfirmed` or `failed`.
 
-The listed paths come from a plain text scan of the PER file (trees, groups
-and labels only). The scan is used for these messages only, never for lookups.
+**Names that need help**:
+
+- *Defined more than once* (TRACE32: `Ambiguous keyword`). A PER file may
+  define the same register under several trees. When every definition has
+  the same address (and, for a field, the same field definition), `reg` reads
+  the first full path and adds a note such as `defined 4 times in the PER
+  file, all at C15:0x4001`. Otherwise it fails and lists the full paths and
+  addresses; give the full path, e.g.
+  `reg '"Core Registers (Core X)"."System Control".SCTLR'`, or read by
+  address.
+- *Read-only `rgroup` entries*. `PER.ADDRESS()` fails on them with TRACE32's
+  internal error `PAR_256`, but `PER.VALUE()` works. `reg` reads the value
+  with `PER.VALUE()`, takes the address from the PER file, and self-checks it
+  as above. `check` files can use these names too.
+
+The paths and addresses come from a plain text scan of the PER file (trees,
+groups and labels only; `sif`/`if` are not evaluated). The scan is used for
+these fallbacks and for error messages; the value always comes from
+TRACE32's PER functions or `Data.Long`.
 
 Coprocessor (CP15) and core registers can only be read from a halted core.
 The read-only commands never halt it; they say so instead. Only `verify` uses

@@ -208,7 +208,7 @@ impl<'a, P: Probe> Session<'a, P> {
                 self.probe = None;
                 let result = (self.connector)().map(|probe| {
                     self.probe = Some(probe);
-                    self.per.invalidate();
+                    self.per.reconnected();
                     Outcome::ok(
                         format!(
                             "connected to PowerView on RCL port {}",

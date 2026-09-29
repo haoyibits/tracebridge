@@ -79,7 +79,13 @@ fn status_reads_state_without_resetting() {
 fn reg_json_output() {
     let rcl = FakeRcl::start();
     halted(&rcl);
-    // No default PER file until PER.ReProgram (as after 'tracebridge open').
+    // No default PER file until PER.ReProgram (as after 'tracebridge open'),
+    // although PER.FILENAME() already names the CPU's PER file.
+    function(&rcl, "PER.FILENAME()", 0x0040, "perx.per");
+    rcl.state().errors.insert(
+        "PER.Set.CONDitions".into(),
+        "No default peripheral file (PER.ReProgram) found.".into(),
+    );
     function(&rcl, "PER.ADDRESS(\".CTRL\")", 0x0020, "C15:0x10010");
     function(
         &rcl,
@@ -109,7 +115,10 @@ fn reg_json_output() {
             .starts_with("MISSING: not found in the PER file")
     );
     let commands = rcl.state().commands();
-    assert_eq!(commands, ["PER.ReProgram", "PER.Set.CONDitions"]);
+    assert_eq!(
+        commands,
+        ["PER.Set.CONDitions", "PER.ReProgram", "PER.Set.CONDitions"]
+    );
     assert_eq!(registers[0]["address_checked"], true);
 }
 

@@ -22,6 +22,9 @@ pub struct Candidate {
     pub address: Option<TargetAddress>,
     /// Defined in an `rgroup` (read-only group).
     pub read_only: bool,
+    /// For `REG.FIELD`: the field's definition line (whitespace collapsed),
+    /// to tell whether duplicate definitions describe the same field.
+    pub field_definition: Option<String>,
 }
 
 /// Quote a path element when it is not a plain name.
@@ -84,9 +87,31 @@ pub fn find(text: &str, register: &str, field: Option<&str>) -> Vec<Candidate> {
     let mut top_base: Option<TargetAddress> = None;
     let mut group: Option<(Option<TargetAddress>, bool)> = None;
     let mut found: Vec<Candidate> = Vec::new();
+    // The last candidate waits for the definition of `field`.
+    let mut awaiting_field = false;
     for raw in text.lines() {
         let line = raw.trim();
         let lower = line.to_ascii_lowercase();
+        if awaiting_field {
+            let kind = lower.split(['.', ' ', '\t']).next().unwrap_or("");
+            if kind.ends_with("fld") || kind == "hexmask" {
+                let label = quoted(line).and_then(|label| label.split(',').next());
+                if label.map(str::trim) == field {
+                    if let Some(candidate) = found.last_mut() {
+                        candidate.field_definition =
+                            Some(line.split_whitespace().collect::<Vec<_>>().join(" "));
+                    }
+                    awaiting_field = false;
+                }
+                continue;
+            }
+            if lower.starts_with("line.")
+                || lower.starts_with("tree")
+                || group_start(line).is_some()
+            {
+                awaiting_field = false;
+            }
+        }
         if lower.starts_with("tree.end") {
             trees.pop();
             group = None;
@@ -140,17 +165,23 @@ pub fn find(text: &str, register: &str, field: Option<&str>) -> Vec<Candidate> {
             if let Some(field) = field {
                 path.push(element(field));
             }
-            let candidate = Candidate {
+            found.push(Candidate {
                 path: path.join("."),
                 address,
                 read_only,
-            };
-            if !found.contains(&candidate) {
-                found.push(candidate);
-            }
+                field_definition: None,
+            });
+            awaiting_field = field.is_some();
         }
     }
-    found
+    // Definitions repeated in the branches of a condition count once.
+    let mut unique: Vec<Candidate> = Vec::new();
+    for candidate in found {
+        if !unique.contains(&candidate) {
+            unique.push(candidate);
+        }
+    }
+    unique
 }
 
 /// Split a user name into (register, field) when it is `NAME` or

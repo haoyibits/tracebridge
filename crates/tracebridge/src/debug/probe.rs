@@ -247,13 +247,13 @@ impl fmt::Display for TargetAddress {
 /// The command-line form of an address that PER.ADDRESS() returned, given its
 /// access class and `ADDRESS.OFFSET()`.
 ///
-/// PER.ADDRESS() of a `C15:` register holds the per-file/command-line address
-/// times 4 (HVBAR, `c15:0x400C` in the PER file, gives offset 0x10030), and
-/// its text form cannot be pasted back. Observed for C15 only, so only C15 is
-/// converted; `reg` checks the result against the value it read.
+/// PER.ADDRESS() of a `C15:` or `C14:` register holds the per-file/command-line
+/// address times 4 (HVBAR, `c15:0x400C` in the PER file, gives offset
+/// 0x10030; DBGDSCREXT, `c14:0x0220`, gives 0x880), and its text form cannot
+/// be pasted back. `reg` checks the result against the value it read.
 pub fn command_line_address(class: &str, offset: u64) -> Option<TargetAddress> {
     let class = class.trim().to_string();
-    if class.eq_ignore_ascii_case("C15") {
+    if class.eq_ignore_ascii_case("C15") || class.eq_ignore_ascii_case("C14") {
         return (offset % 4 == 0).then_some(TargetAddress {
             class,
             value: offset / 4,
@@ -333,9 +333,12 @@ impl DebuggerState {
 /// `PER.Set.CONDitions` snapshot.
 ///
 /// A PowerView started without `PER.ReProgram` has no default PER file, and
-/// every PER function fails with "No default peripheral file". Without
-/// arguments, `PER.ReProgram` loads the CPU's default PER file from the system
-/// directory; like `PER.Set.CONDitions` it changes debugger state only.
+/// every PER function fails with "No default peripheral file". PER.FILENAME()
+/// does not show this: it names the CPU's PER file before and after. So the
+/// error itself triggers `PER.ReProgram` without arguments, which loads the
+/// CPU's default PER file from the system directory, at most once per
+/// connection; the failed call is then retried. Like `PER.Set.CONDitions`, it
+/// changes debugger state only.
 ///
 /// The PER functions cannot evaluate the IF conditions of a PER file (a per
 /// file may wrap all core registers in one); `PER.Set.CONDitions` snapshots
@@ -345,10 +348,17 @@ impl DebuggerState {
 #[derive(Debug, Default)]
 pub struct PerSnapshot {
     taken: Option<DebuggerState>,
+    /// `PER.ReProgram` already ran on this connection.
+    reprogrammed: bool,
     /// The TRACE32 system directory, where a bare PER file name lives.
     system_dir: Option<PathBuf>,
-    /// The loaded PER file, for error messages.
+    /// The PER file on disk, for the text scan behind error messages.
     file: Option<PathBuf>,
+}
+
+/// TRACE32's error when no PER file has been loaded with PER.ReProgram.
+pub fn is_missing_per_file(message: &str) -> bool {
+    message.contains("No default peripheral file")
 }
 
 impl PerSnapshot {
@@ -363,41 +373,60 @@ impl PerSnapshot {
         self.taken = None;
     }
 
+    /// A new connection: PowerView may have been restarted.
+    pub fn reconnected(&mut self) {
+        self.taken = None;
+        self.reprogrammed = false;
+        self.file = None;
+    }
+
     /// The PER file PowerView uses, when it could be found on disk.
     pub fn file(&self) -> Option<&Path> {
         self.file.as_deref()
     }
 
-    /// `PER.FILENAME()`: empty or failing means no default PER file.
-    fn filename(probe: &mut dyn Probe) -> DResult<Option<String>> {
-        match probe.fnc("PER.FILENAME()") {
-            Ok(Value::Text(name)) if !name.trim().is_empty() => Ok(Some(name.trim().to_string())),
-            Ok(_) => Ok(None),
-            Err(error) => {
-                let error = DebugError::from(error);
-                if error.lost { Err(error) } else { Ok(None) }
-            }
+    /// Run `PER.ReProgram` after `error`, once per connection. Returns true
+    /// when it ran, so the failed call should be retried.
+    pub fn reprogram_after(&mut self, probe: &mut dyn Probe, error: &str) -> DResult<bool> {
+        if self.reprogrammed || !is_missing_per_file(error) {
+            return Ok(false);
         }
+        self.reprogrammed = true;
+        eprintln!(
+            "tracebridge: no default PER file loaded; running PER.ReProgram (loads the CPU's \
+             default PER file; debugger state only, the target is not touched)"
+        );
+        if let Err(error) = probe.cmd("PER.ReProgram") {
+            let error = DebugError::from(error);
+            if error.lost {
+                return Err(error);
+            }
+            eprintln!("tracebridge: warning: PER.ReProgram failed ({error})");
+            return Ok(false);
+        }
+        // The old snapshot, if any, belongs to no PER file.
+        self.taken = None;
+        Ok(true)
     }
 
-    fn ensure_loaded(&mut self, probe: &mut dyn Probe) -> DResult<()> {
-        let mut name = Self::filename(probe)?;
-        if name.is_none() {
-            eprintln!(
-                "tracebridge: no default PER file loaded; running PER.ReProgram (loads the \
-                 CPU's default PER file; debugger state only, the target is not touched)"
-            );
-            if let Err(error) = probe.cmd("PER.ReProgram") {
-                let error = DebugError::from(error);
-                if error.lost {
-                    return Err(error);
-                }
-                eprintln!("tracebridge: warning: PER.ReProgram failed ({error})");
+    fn set_conditions(&mut self, probe: &mut dyn Probe) -> DResult<()> {
+        let mut result = probe.cmd("PER.Set.CONDitions").map_err(DebugError::from);
+        if let Err(error) = &result {
+            if !error.lost && self.reprogram_after(probe, &error.message)? {
+                result = probe.cmd("PER.Set.CONDitions").map_err(DebugError::from);
             }
-            name = Self::filename(probe)?;
         }
-        self.file = name.and_then(|name| perfile::locate(&name, self.system_dir.as_deref()));
-        Ok(())
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if error.lost => Err(error),
+            Err(error) => {
+                eprintln!(
+                    "tracebridge: warning: PER.Set.CONDitions failed ({error}); registers \
+                     inside IF conditions of the PER file may not resolve"
+                );
+                Ok(())
+            }
+        }
     }
 
     pub fn ensure(&mut self, probe: &mut dyn Probe) -> DResult<()> {
@@ -405,19 +434,23 @@ impl PerSnapshot {
         if self.taken == Some(state) && state.running != Some(true) {
             return Ok(());
         }
-        self.ensure_loaded(probe)?;
-        if let Err(error) = probe.cmd("PER.Set.CONDitions") {
-            let error = DebugError::from(error);
-            if error.lost {
-                return Err(error);
-            }
-            eprintln!(
-                "tracebridge: warning: PER.Set.CONDitions failed ({error}); registers inside \
-                 IF conditions of the PER file may not resolve"
-            );
+        self.set_conditions(probe)?;
+        if let Some(Value::Text(name)) = optional_value(probe, "PER.FILENAME()")? {
+            self.file = perfile::locate(&name, self.system_dir.as_deref());
         }
         self.taken = Some(state);
         Ok(())
+    }
+}
+
+/// A function result, `None` when TRACE32 cannot evaluate it.
+fn optional_value(probe: &mut dyn Probe, expression: &str) -> DResult<Option<Value>> {
+    match probe.fnc(expression) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) => {
+            let error = DebugError::from(error);
+            if error.lost { Err(error) } else { Ok(None) }
+        }
     }
 }
 
@@ -564,6 +597,15 @@ fn symbol_error(error: DebugError, name: &str) -> DebugError {
     }
 }
 
+/// Where a register's address comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressSource {
+    /// PER.ADDRESS(), converted to the command-line form.
+    PerAddress,
+    /// The text scan of the PER file, when PER.ADDRESS() fails (PAR_256).
+    PerFile,
+}
+
 /// A register found in the PER file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PerRegister {
@@ -571,10 +613,17 @@ pub struct PerRegister {
     pub path: String,
     /// The address as the PowerView command line reads it.
     pub address: TargetAddress,
-    /// PER.ADDRESS()'s own text, which for C15 is not a command-line address.
+    /// PER.ADDRESS()'s own text, which for C14/C15 is not a command-line
+    /// address.
     pub raw: String,
     /// PER.ADDRESS()'s offset.
-    pub offset: u64,
+    pub offset: Option<u64>,
+    pub source: AddressSource,
+    /// The register that holds this field, when the name is `REG.FIELD` and
+    /// the address came from the PER file.
+    pub register_path: Option<String>,
+    /// Shown with the value, e.g. how a duplicate name was resolved.
+    pub note: Option<String>,
 }
 
 /// The PER paths to try for a user-supplied name: `.NAME` searches the whole
@@ -631,35 +680,140 @@ fn per_address(probe: &mut dyn Probe, path: &str) -> DResult<PerRegister> {
         path: path.to_string(),
         address,
         raw: raw.trim().to_string(),
-        offset,
+        offset: Some(offset),
+        source: AddressSource::PerAddress,
+        register_path: None,
+        note: None,
     })
 }
 
-/// Resolve a register name with `PER.ADDRESS()`. Failures are explained:
-/// an ambiguous name lists the full paths from the PER file, and entries the
-/// PER functions cannot resolve suggest reading by address.
-pub fn resolve_register(
-    probe: &mut dyn Probe,
-    per: &PerSnapshot,
-    name: &str,
-) -> DResult<PerRegister> {
-    let mut first_error: Option<DebugError> = None;
+/// PER.ADDRESS() for each candidate path; the first error message otherwise.
+fn try_paths(probe: &mut dyn Probe, name: &str) -> DResult<Result<PerRegister, String>> {
+    let mut first_error: Option<String> = None;
     for path in per_candidates(name) {
         match per_address(probe, &path) {
-            Ok(register) => return Ok(register),
+            Ok(register) => return Ok(Ok(register)),
             Err(error) if error.lost => return Err(error),
             Err(error) => {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
+                first_error.get_or_insert(error.message);
             }
         }
     }
-    let message = first_error.map(|e| e.message).unwrap_or_default();
+    Ok(Err(first_error.unwrap_or_default()))
+}
+
+/// The address all candidates share.
+fn common_address(candidates: &[perfile::Candidate]) -> Option<TargetAddress> {
+    let first = candidates.first()?.address.clone()?;
+    candidates
+        .iter()
+        .all(|c| c.address.as_ref() == Some(&first))
+        .then_some(first)
+}
+
+/// A register whose address comes from the PER file scan; PER.VALUE() still
+/// reads it through `path`.
+fn from_per_file(
+    name: &str,
+    candidates: &[perfile::Candidate],
+    path: String,
+    note: Option<String>,
+) -> Option<PerRegister> {
+    let address = common_address(candidates)?;
+    let (_, field) = perfile::register_and_field(name)?;
+    let register_path = field.and_then(|_| parent_path(&path).map(str::to_string));
+    Some(PerRegister {
+        path,
+        address,
+        raw: "(address from the PER file)".into(),
+        offset: None,
+        source: AddressSource::PerFile,
+        register_path,
+        note,
+    })
+}
+
+/// An ambiguous name whose definitions all describe the same register:
+/// the same address, and for a field the same field definition. It is read
+/// through the first full path, with a note.
+fn resolve_duplicate(
+    probe: &mut dyn Probe,
+    name: &str,
+    candidates: &[perfile::Candidate],
+) -> DResult<Option<PerRegister>> {
+    if candidates.len() < 2 {
+        return Ok(None);
+    }
+    let Some(address) = common_address(candidates) else {
+        return Ok(None);
+    };
+    let Some((_, field)) = perfile::register_and_field(name) else {
+        return Ok(None);
+    };
+    if field.is_some() {
+        let first = &candidates[0].field_definition;
+        if first.is_none() || candidates.iter().any(|c| &c.field_definition != first) {
+            return Ok(None);
+        }
+    }
+    let path = candidates[0].path.clone();
+    let note = format!(
+        "defined {} times in the PER file, all at {address}; read as '{path}'",
+        candidates.len()
+    );
+    match per_address(probe, &path) {
+        Ok(mut register) => {
+            register.note = Some(note);
+            Ok(Some(register))
+        }
+        Err(error) if error.lost => Err(error),
+        Err(error) if error.message.contains("PAR_256") => {
+            Ok(from_per_file(name, candidates, path, Some(note)))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// Resolve a register name with `PER.ADDRESS()`.
+///
+/// - "No default peripheral file": `PER.ReProgram` once, then retry.
+/// - PAR_256 (PER.ADDRESS() fails on rgroup entries, PER.VALUE() works): the
+///   address comes from the PER file scan.
+/// - Ambiguous, but every definition is the same register: read the first.
+///
+/// Other failures are explained: an ambiguous name lists the full paths from
+/// the PER file, and unresolvable entries suggest reading by address.
+pub fn resolve_register(
+    probe: &mut dyn Probe,
+    per: &mut PerSnapshot,
+    name: &str,
+) -> DResult<PerRegister> {
+    let mut message = match try_paths(probe, name)? {
+        Ok(register) => return Ok(register),
+        Err(message) => message,
+    };
+    if per.reprogram_after(probe, &message)? {
+        per.ensure(probe)?;
+        message = match try_paths(probe, name)? {
+            Ok(register) => return Ok(register),
+            Err(message) => message,
+        };
+    }
     let candidates = match per.file() {
         Some(file) => perfile::scan(file, name),
         None => Vec::new(),
     };
+    if message.contains("PAR_256") {
+        let path = per_candidates(name).remove(0);
+        if let Some(register) = from_per_file(name, &candidates, path, None) {
+            return Ok(register);
+        }
+    }
+    if message.to_ascii_lowercase().contains("ambig") {
+        if let Some(register) = resolve_duplicate(probe, name, &candidates)? {
+            return Ok(register);
+        }
+    }
     Err(DebugError::new(lookup_error(name, &message, &candidates)))
 }
 
@@ -765,40 +919,83 @@ fn parent_path(path: &str) -> Option<&str> {
     last.map(|index| &path[..index])
 }
 
+/// The result of the address self-check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressCheck {
+    /// A memory-mapped address: no conversion, nothing to check.
+    NotApplicable,
+    /// `Data.Long(<address>)` read the register's value.
+    Confirmed,
+    /// The value is 0 or all ones, which a wrong address may read too.
+    Unconfirmed,
+    /// `Data.Long(<address>)` read something else, or failed (bus error).
+    Failed,
+}
+
+impl AddressCheck {
+    pub fn as_json(self) -> serde_json::Value {
+        match self {
+            AddressCheck::Confirmed => true.into(),
+            AddressCheck::Failed => false.into(),
+            AddressCheck::Unconfirmed | AddressCheck::NotApplicable => serde_json::Value::Null,
+        }
+    }
+
+    pub fn name(self) -> Option<&'static str> {
+        match self {
+            AddressCheck::NotApplicable => None,
+            AddressCheck::Confirmed => Some("confirmed"),
+            AddressCheck::Unconfirmed => Some("unconfirmed"),
+            AddressCheck::Failed => Some("failed"),
+        }
+    }
+}
+
 /// Does the printed address of a coprocessor register read the same
 /// register? `Data.Long(<address>)` must equal the register's value (the
-/// parent register's when `register` is a field, i.e. when the parent path
-/// resolves to the same address). `None`: not a coprocessor address, or
-/// nothing to compare with.
+/// containing register's when `register` is a field). A value of 0 or all
+/// ones cannot confirm an address: wrong addresses often read the same.
 pub fn verify_address(
     probe: &mut dyn Probe,
     register: &PerRegister,
     value: u64,
-) -> DResult<Option<bool>> {
+) -> DResult<AddressCheck> {
+    const MASK: u64 = 0xFFFF_FFFF;
     if !register.address.is_coprocessor() {
-        return Ok(None);
+        return Ok(AddressCheck::NotApplicable);
+    }
+    fn per_value(probe: &mut dyn Probe, path: &str) -> DResult<Option<u64>> {
+        optional_u64(probe, &format!("PER.VALUE({})", practice_string(path)))
     }
     let mut whole = value;
-    if let Some(parent) = parent_path(&register.path) {
+    if let Some(path) = &register.register_path {
+        match per_value(probe, path)? {
+            Some(value) => whole = value,
+            None => return Ok(AddressCheck::Unconfirmed),
+        }
+    } else if let Some(parent) = parent_path(&register.path) {
         match per_address(probe, parent) {
-            Ok(parent) if parent.offset == register.offset => {
-                match optional_u64(
-                    probe,
-                    &format!("PER.VALUE({})", practice_string(&parent.path)),
-                )? {
-                    Some(value) => whole = value,
-                    None => return Ok(None),
-                }
-            }
+            Ok(parent) if parent.offset == register.offset => match per_value(probe, &parent.path)?
+            {
+                Some(value) => whole = value,
+                None => return Ok(AddressCheck::Unconfirmed),
+            },
             Err(error) if error.lost => return Err(error),
             // A tree or a different register: `register` is the register.
             _ => {}
         }
     }
     let read = optional_u64(probe, &format!("Data.Long({})", register.address))?;
-    Ok(Some(read.is_some_and(|read| {
-        read & 0xFFFF_FFFF == whole & 0xFFFF_FFFF
-    })))
+    Ok(match read {
+        Some(read) if read & MASK == whole & MASK => {
+            if matches!(whole & MASK, 0 | MASK) {
+                AddressCheck::Unconfirmed
+            } else {
+                AddressCheck::Confirmed
+            }
+        }
+        _ => AddressCheck::Failed,
+    })
 }
 
 /// `Data.Long(<address>)`: 32 bits with PowerView's addressing.
@@ -826,8 +1023,10 @@ pub mod fake {
         pub failing_commands: Vec<String>,
         /// Every call fails as if the connection had been lost.
         pub disconnected: bool,
-        /// Functions that fail with this TRACE32 message.
+        /// Functions and commands that fail with this TRACE32 message.
         pub errors: HashMap<String, String>,
+        /// PER.ReProgram succeeds but loads nothing.
+        pub reprogram_fails: bool,
     }
 
     fn lost() -> t32rcl::Error {
@@ -889,6 +1088,19 @@ pub mod fake {
             }
             if self.failing_commands.iter().any(|c| command.starts_with(c)) {
                 return Err(t32rcl::Error::Trace32(fake_error(command)));
+            }
+            if let Some(message) = self.errors.get(command) {
+                return Err(t32rcl::Error::Trace32(t32rcl::Trace32Error {
+                    code: Some(t32rcl::T32_ERR_FN1),
+                    operation: t32rcl::Operation::Command(command.into()),
+                    message: message.clone(),
+                }));
+            }
+            // Like TRACE32: loading the default PER file makes the PER
+            // functions work.
+            if command == "PER.ReProgram" && !self.reprogram_fails {
+                self.errors
+                    .retain(|_, message| !is_missing_per_file(message));
             }
             Ok(())
         }
@@ -961,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn c15_addresses_are_converted_to_the_command_line_form() {
+    fn coprocessor_addresses_are_converted_to_the_command_line_form() {
         // PER.ADDRESS() of c15:0x400C: its text cannot be pasted back and its
         // offset is the command-line address times 4.
         let mut probe = FakeProbe::with(&[
@@ -970,6 +1182,8 @@ mod tests {
                 "ADDRESS.OFFSET(PER.ADDRESS(\".VBAR\"))",
                 Value::Int(0x400C * 4),
             ),
+            ("PER.ADDRESS(\".DSCR\")", Value::Text("C14:0x2200".into())),
+            ("ADDRESS.OFFSET(PER.ADDRESS(\".DSCR\"))", Value::Int(0x880)),
             (
                 "PER.ADDRESS(\".CTRL\")",
                 Value::Text("AD:0x40020000".into()),
@@ -979,35 +1193,56 @@ mod tests {
                 Value::Int(0x4002_0000),
             ),
         ]);
-        let per = PerSnapshot::default();
-        let register = resolve_register(&mut probe, &per, "VBAR").unwrap();
+        let mut per = PerSnapshot::default();
+        let register = resolve_register(&mut probe, &mut per, "VBAR").unwrap();
         assert_eq!(register.path, ".VBAR");
         assert_eq!(register.address.to_string(), "C15:0x400C");
         assert_eq!(register.raw, "C15:0x400C0");
-        let register = resolve_register(&mut probe, &per, "CTRL").unwrap();
+        assert_eq!(register.source, AddressSource::PerAddress);
+        // C14 follows the same rule (confirmed on hardware).
+        let register = resolve_register(&mut probe, &mut per, "DSCR").unwrap();
+        assert_eq!(register.address.to_string(), "C14:0x0220");
+        let register = resolve_register(&mut probe, &mut per, "CTRL").unwrap();
         assert_eq!(register.address.to_string(), "AD:0x40020000");
 
         assert_eq!(
             command_line_address("C15", 0x000E * 4).unwrap().to_string(),
             "C15:0x000E"
         );
-        assert_eq!(command_line_address("C15", 0x3), None);
-        // C14 is not converted (not confirmed); reg checks the result.
         assert_eq!(
             command_line_address("C14", 0x1C0).unwrap().to_string(),
-            "C14:0x01C0"
+            "C14:0x0070"
         );
+        assert_eq!(command_line_address("C15", 0x3), None);
     }
 
+    const PER_FILE: &str = "\
+tree \"Core (X)\"
+tree \"System Control\"
+  group.long c15:0x1001++0x00
+    line.long 0x00 \"SCTLR,Control\"
+      bitfld.long 0x00 2. \"C,Cache enable\" \"Off,On\"
+      bitfld.long 0x00 4. \"E,Endianness\" \"LE,BE\"
+  group.long c15:0x2001++0x00
+    line.long 0x00 \"ACTLR,Auxiliary\"
+tree.end
+tree \"Hyp\"
+  group.long c15:0x1001++0x00
+    line.long 0x00 \"SCTLR,Control\"
+      bitfld.long 0x00 2. \"C,Cache enable\" \"Off,On\"
+      bitfld.long 0x00 5. \"E,Endianness\" \"LE,BE\"
+  group.long c15:0x3001++0x00
+    line.long 0x00 \"ACTLR,Auxiliary\"
+  rgroup.long c15:0x000E++0x00
+    line.long 0x00 \"CNTFRQ,Frequency\"
+      hexmask.long 0x00 0.--31. 1. \"FREQ,Frequency\"
+tree.end
+tree.end
+";
+
+    /// A PER snapshot whose PER file is `PER_FILE` on disk.
     fn scanned_per_file(dir: &Path) -> PerSnapshot {
-        std::fs::write(
-            dir.join("perx.per"),
-            "tree \"Core (X)\"\ntree \"System Control\"\n  group.long c15:0x1001++0x00\n    \
-             line.long 0x00 \"SCTLR,Control\"\ntree.end\ntree \"Hyp\"\n  group.long c15:0x1001++0x00\n    \
-             line.long 0x00 \"SCTLR,Control\"\n  rgroup.long c15:0x000E++0x00\n    \
-             line.long 0x00 \"CNTFRQ,Frequency\"\ntree.end\ntree.end\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("perx.per"), PER_FILE).unwrap();
         let mut per = PerSnapshot::new(Some(dir.to_path_buf()));
         let mut probe = FakeProbe::with(&[
             ("PER.FILENAME()", Value::Text("perx.per".into())),
@@ -1019,12 +1254,19 @@ mod tests {
         per
     }
 
+    fn ambiguous(probe: &mut FakeProbe, name: &str) {
+        probe.errors.insert(
+            format!("PER.ADDRESS({})", practice_string(&format!(".{name}"))),
+            format!("Ambiguous keyword '{name}'"),
+        );
+    }
+
     #[test]
     fn not_found_is_reported_as_such() {
         let dir = tempfile::tempdir().unwrap();
-        let per = scanned_per_file(dir.path());
+        let mut per = scanned_per_file(dir.path());
         let mut probe = FakeProbe::default();
-        let error = resolve_register(&mut probe, &per, "NOPE").unwrap_err();
+        let error = resolve_register(&mut probe, &mut per, "NOPE").unwrap_err();
         assert!(
             error.message.starts_with("NOPE: not found in the PER file"),
             "{error}"
@@ -1034,27 +1276,24 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_names_list_full_paths_and_the_address() {
+    fn real_ambiguity_lists_full_paths_and_addresses() {
         let dir = tempfile::tempdir().unwrap();
-        let per = scanned_per_file(dir.path());
+        let mut per = scanned_per_file(dir.path());
         let mut probe = FakeProbe::default();
-        probe.errors.insert(
-            "PER.ADDRESS(\".SCTLR\")".into(),
-            "Ambiguous keyword 'SCTLR'".into(),
-        );
-        let error = resolve_register(&mut probe, &per, "SCTLR").unwrap_err();
+        ambiguous(&mut probe, "ACTLR");
+        let error = resolve_register(&mut probe, &mut per, "ACTLR").unwrap_err();
         assert_eq!(
             error.message,
-            "SCTLR: the name occurs more than once in the PER file (TRACE32: Ambiguous \
-             keyword 'SCTLR'). Give the full path, with the elements separated by dots and \
-             quoted when they contain spaces, e.g. reg '\"<tree>\".\"<subtree>\".SCTLR', or \
-             read it by address: reg C15:0x1001\n  \
+            "ACTLR: the name occurs more than once in the PER file (TRACE32: Ambiguous \
+             keyword 'ACTLR'). Give the full path, with the elements separated by dots and \
+             quoted when they contain spaces, e.g. reg '\"<tree>\".\"<subtree>\".ACTLR', or \
+             read it by address: reg <class>:<address>\n  \
              defined in the PER file as:\n    \
-             reg '\"Core (X)\".\"System Control\".SCTLR'  (C15:0x1001)\n    \
-             reg '\"Core (X)\".Hyp.SCTLR'  (C15:0x1001)"
+             reg '\"Core (X)\".\"System Control\".ACTLR'  (C15:0x2001)\n    \
+             reg '\"Core (X)\".Hyp.ACTLR'  (C15:0x3001)"
         );
         // Without the PER file on disk, the advice stays generic.
-        let error = resolve_register(&mut probe, &PerSnapshot::default(), "SCTLR").unwrap_err();
+        let error = resolve_register(&mut probe, &mut PerSnapshot::default(), "ACTLR").unwrap_err();
         assert!(
             error
                 .message
@@ -1064,51 +1303,145 @@ mod tests {
     }
 
     #[test]
-    fn par_256_is_not_called_not_found() {
+    fn duplicate_definitions_of_one_register_are_read_through_the_first_path() {
         let dir = tempfile::tempdir().unwrap();
-        let per = scanned_per_file(dir.path());
+        let mut per = scanned_per_file(dir.path());
         let mut probe = FakeProbe::default();
-        probe.errors.insert(
-            "PER.ADDRESS(\".CNTFRQ\")".into(),
-            "internal error : PAR_256".into(),
+        let first = "\"Core (X)\".\"System Control\".SCTLR";
+        for (path, offset) in [
+            (first.to_string(), 0x1001 * 4),
+            (format!("{first}.C"), 0x1001 * 4),
+        ] {
+            let function = format!("PER.ADDRESS({})", practice_string(&path));
+            probe.set(&function, Value::Text("C15:0x10010".into()));
+            probe.set(&format!("ADDRESS.OFFSET({function})"), Value::Int(offset));
+        }
+        ambiguous(&mut probe, "SCTLR");
+        let register = resolve_register(&mut probe, &mut per, "SCTLR").unwrap();
+        assert_eq!(register.path, first);
+        assert_eq!(register.address.to_string(), "C15:0x1001");
+        assert_eq!(
+            register.note.as_deref(),
+            Some(
+                "defined 2 times in the PER file, all at C15:0x1001; read as \
+                 '\"Core (X)\".\"System Control\".SCTLR'"
+            )
         );
-        let error = resolve_register(&mut probe, &per, "CNTFRQ").unwrap_err();
+        // A field with the same definition everywhere resolves too...
+        ambiguous(&mut probe, "SCTLR.C");
+        let register = resolve_register(&mut probe, &mut per, "SCTLR.C").unwrap();
+        assert_eq!(register.path, format!("{first}.C"));
+        // ...a field defined differently does not.
+        ambiguous(&mut probe, "SCTLR.E");
+        let error = resolve_register(&mut probe, &mut per, "SCTLR.E").unwrap_err();
+        assert!(error.message.contains("occurs more than once"), "{error}");
+    }
+
+    #[test]
+    fn rgroup_entries_take_the_address_from_the_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut per = scanned_per_file(dir.path());
+        let mut probe = FakeProbe::default();
+        for path in [".CNTFRQ", ".CNTFRQ.FREQ"] {
+            probe.errors.insert(
+                format!("PER.ADDRESS({})", practice_string(path)),
+                "internal error : PAR_256".into(),
+            );
+        }
+        let register = resolve_register(&mut probe, &mut per, "CNTFRQ").unwrap();
+        assert_eq!(register.path, ".CNTFRQ");
+        assert_eq!(register.address.to_string(), "C15:0x000E");
+        assert_eq!(register.source, AddressSource::PerFile);
+        assert_eq!(register.register_path, None);
+        let register = resolve_register(&mut probe, &mut per, "CNTFRQ.FREQ").unwrap();
+        assert_eq!(register.register_path.as_deref(), Some(".CNTFRQ"));
+
+        // Without an address from the PER file, the error explains PAR_256.
+        let error =
+            resolve_register(&mut probe, &mut PerSnapshot::default(), "CNTFRQ").unwrap_err();
         assert!(
             error.message.starts_with(
                 "CNTFRQ: TRACE32's PER functions could not resolve this entry (internal error \
-                 PAR_256; seen for read-only rgroup definitions); read it by address: reg \
-                 C15:0x000E"
+                 PAR_256; seen for read-only rgroup definitions); read it by address"
             ),
             "{error}"
         );
         assert!(!error.message.contains("not found"));
-        assert!(error.message.ends_with("(C15:0x000E)  rgroup"));
+    }
+
+    const MISSING: &str = "No default peripheral file (PER.ReProgram) found.";
+
+    #[test]
+    fn per_reprogram_is_triggered_by_the_error_not_the_file_name() {
+        // PER.FILENAME() names the CPU's PER file although none is loaded.
+        let mut probe = FakeProbe::with(&[
+            ("PER.FILENAME()", Value::Text("perx.per".into())),
+            ("SYStem.Mode()", Value::Int(11)),
+            ("STATE.RUN()", Value::Bool(false)),
+        ]);
+        probe
+            .errors
+            .insert("PER.Set.CONDitions".into(), MISSING.into());
+        let mut per = PerSnapshot::default();
+        per.ensure(&mut probe).unwrap();
+        assert_eq!(
+            probe.commands(),
+            ["PER.Set.CONDitions", "PER.ReProgram", "PER.Set.CONDitions"]
+        );
+        // Later snapshots do not load it again.
+        per.invalidate();
+        per.ensure(&mut probe).unwrap();
+        assert_eq!(probe.commands().len(), 4);
+        assert_eq!(probe.commands()[3], "PER.Set.CONDitions");
     }
 
     #[test]
-    fn per_reprogram_runs_only_without_a_default_per_file() {
-        let state = [
+    fn a_failing_lookup_loads_the_per_file_and_retries() {
+        let mut probe = FakeProbe::with(&[
             ("SYStem.Mode()", Value::Int(11)),
             ("STATE.RUN()", Value::Bool(false)),
-        ];
-        // PER.FILENAME() fails: no PER file.
-        let mut probe = FakeProbe::with(&state);
-        PerSnapshot::default().ensure(&mut probe).unwrap();
+            ("PER.ADDRESS(\".HSR\")", Value::Text("C15:0x40250".into())),
+            (
+                "ADDRESS.OFFSET(PER.ADDRESS(\".HSR\"))",
+                Value::Int(0x4025 * 4),
+            ),
+        ]);
+        probe
+            .errors
+            .insert("PER.ADDRESS(\".HSR\")".into(), MISSING.into());
+        let register = resolve_register(&mut probe, &mut PerSnapshot::default(), "HSR").unwrap();
+        assert_eq!(register.address.to_string(), "C15:0x4025");
         assert_eq!(probe.commands(), ["PER.ReProgram", "PER.Set.CONDitions"]);
-        // Empty name: no PER file either.
-        let mut probe = FakeProbe::with(&state);
-        probe.set("PER.FILENAME()", Value::Text(String::new()));
-        PerSnapshot::default().ensure(&mut probe).unwrap();
-        assert_eq!(probe.commands(), ["PER.ReProgram", "PER.Set.CONDitions"]);
-        // Loaded: nothing to do.
-        let mut probe = FakeProbe::with(&state);
-        probe.set("PER.FILENAME()", Value::Text("perx.per".into()));
+    }
+
+    #[test]
+    fn per_reprogram_runs_at_most_once_per_connection() {
+        let mut probe = FakeProbe::with(&[
+            ("SYStem.Mode()", Value::Int(11)),
+            ("STATE.RUN()", Value::Bool(false)),
+        ]);
+        probe.reprogram_fails = true;
+        probe
+            .errors
+            .insert("PER.Set.CONDitions".into(), MISSING.into());
+        probe
+            .errors
+            .insert("PER.ADDRESS(\".HSR\")".into(), MISSING.into());
         let mut per = PerSnapshot::default();
         per.ensure(&mut probe).unwrap();
-        assert_eq!(probe.commands(), ["PER.Set.CONDitions"]);
-        // The snapshot is kept while nothing changes.
+        assert!(resolve_register(&mut probe, &mut per, "HSR").is_err());
+        let reprograms = |probe: &FakeProbe| {
+            probe
+                .commands()
+                .iter()
+                .filter(|c| **c == "PER.ReProgram")
+                .count()
+        };
+        assert_eq!(reprograms(&probe), 1);
+        // A new connection may have a new PowerView.
+        per.reconnected();
         per.ensure(&mut probe).unwrap();
-        assert_eq!(probe.commands(), ["PER.Set.CONDitions"]);
+        assert_eq!(reprograms(&probe), 2);
     }
 
     #[test]

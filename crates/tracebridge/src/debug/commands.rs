@@ -10,8 +10,9 @@ use super::check;
 use super::decode::{self, FaultAddress};
 use super::elf;
 use super::probe::{
-    self, DResult, DebugError, DebuggerState, PerSnapshot, Probe, SymbolRef, TargetAddress,
-    eval_u64, fail, format_value, hex32, read_long, running_error, symbolize, value_as_u64,
+    self, AddressCheck, AddressSource, DResult, DebugError, DebuggerState, PerSnapshot, Probe,
+    SymbolRef, TargetAddress, eval_u64, fail, format_value, hex32, read_long, running_error,
+    symbolize, value_as_u64,
 };
 use super::{EXIT_FAILED, Outcome};
 use crate::config::Config;
@@ -142,8 +143,12 @@ struct RegEntry {
     name: String,
     path: Option<String>,
     address: Option<String>,
-    /// `Data.Long(address)` read the same register (coprocessor names only).
-    address_checked: Option<bool>,
+    /// The address column when it needs an explanation.
+    shown_address: Option<String>,
+    raw_address: Option<String>,
+    /// Whether `Data.Long(address)` reads the same register.
+    address_check: AddressCheck,
+    note: Option<String>,
     value: Option<u64>,
     choice: Option<String>,
     error: Option<String>,
@@ -166,7 +171,10 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
             name: name.clone(),
             path: None,
             address: None,
-            address_checked: None,
+            shown_address: None,
+            raw_address: None,
+            address_check: AddressCheck::NotApplicable,
+            note: None,
             value: None,
             choice: None,
             error: None,
@@ -185,6 +193,8 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
             let register = probe::resolve_register(probe, ctx.per, name)?;
             entry.path = Some(register.path.clone());
             entry.address = Some(register.address.to_string());
+            entry.note = register.note.clone();
+            entry.raw_address = Some(register.raw.clone());
             if register.address.is_coprocessor() && running {
                 return Err(running_error(&format!(
                     "{name} ({}, a coprocessor register)",
@@ -194,12 +204,27 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
             let value = probe::read_register(probe, &register)?;
             entry.value = Some(value);
             entry.choice = probe::read_choice(probe, &register)?;
-            entry.address_checked = probe::verify_address(probe, &register, value)?;
-            if entry.address_checked == Some(false) {
-                entry.address = Some(format!(
-                    "{} (PER.ADDRESS text; no command-line address reads this register)",
-                    register.raw
-                ));
+            entry.address_check = probe::verify_address(probe, &register, value)?;
+            match (entry.address_check, register.source) {
+                (AddressCheck::Failed, AddressSource::PerAddress) => {
+                    entry.shown_address = Some(format!(
+                        "{} (PER.ADDRESS text; no command-line address reads this register)",
+                        register.raw
+                    ));
+                }
+                (AddressCheck::Failed, AddressSource::PerFile) => {
+                    entry.shown_address = Some(format!(
+                        "{} (from the PER file; Data.Long there reads another value)",
+                        register.address
+                    ));
+                }
+                (AddressCheck::Unconfirmed, _) => {
+                    entry.shown_address = Some(format!(
+                        "{} (unconfirmed: the value cannot tell)",
+                        register.address
+                    ));
+                }
+                _ => {}
             }
             Ok(())
         })();
@@ -219,7 +244,11 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
     let lines: Vec<String> = entries
         .iter()
         .map(|entry| {
-            let address = entry.address.clone().unwrap_or_default();
+            let address = entry
+                .shown_address
+                .clone()
+                .or_else(|| entry.address.clone())
+                .unwrap_or_default();
             match (&entry.error, entry.value) {
                 (Some(error), _) => format!("{:<width$}  error: {error}", entry.name),
                 (None, Some(value)) => {
@@ -227,6 +256,9 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
                         format!("{:<width$}  {address:<16}  {}", entry.name, hex32(value));
                     if let Some(choice) = &entry.choice {
                         line.push_str(&format!("  \"{choice}\""));
+                    }
+                    if let Some(note) = &entry.note {
+                        line.push_str(&format!("\n{:<width$}  note: {note}", ""));
                     }
                     line
                 }
@@ -242,7 +274,10 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
                 "name": e.name,
                 "path": e.path,
                 "address": e.address,
-                "address_checked": e.address_checked,
+                "raw_address": e.raw_address,
+                "address_checked": e.address_check.as_json(),
+                "address_check": e.address_check.name(),
+                "note": e.note,
                 "value": e.value,
                 "hex": e.value.map(hex32),
                 "choice": e.choice,
@@ -916,20 +951,148 @@ mod tests {
     }
 
     #[test]
-    fn reg_loads_the_default_per_file_first() {
+    fn reg_loads_the_default_per_file_when_per_functions_say_so() {
         let mut probe = halted_hyp_probe();
-        probe.values.remove("PER.FILENAME()");
         c15_register(&mut probe);
+        // PER.FILENAME() names a file even though none is loaded.
+        probe.errors.insert(
+            "PER.Set.CONDitions".into(),
+            "No default peripheral file (PER.ReProgram) found.".into(),
+        );
         let names = ["CTRL".to_string()];
-        run(&mut probe, |ctx| reg(ctx, &names)).unwrap();
-        assert_eq!(probe.commands(), ["PER.ReProgram", "PER.Set.CONDitions"]);
+        let outcome = run(&mut probe, |ctx| reg(ctx, &names)).unwrap();
+        assert_eq!(outcome.code, 0, "{}", outcome.text);
+        assert_eq!(
+            probe.commands(),
+            ["PER.Set.CONDitions", "PER.ReProgram", "PER.Set.CONDitions"]
+        );
         // Raw addresses need no PER file.
         let mut probe = halted_hyp_probe();
-        probe.values.remove("PER.FILENAME()");
         probe.set("Data.Long(C15:0x1F12)", Value::Int(1));
         let names = ["C15:0x1F12".to_string()];
         run(&mut probe, |ctx| reg(ctx, &names)).unwrap();
         assert!(probe.commands().is_empty());
+    }
+
+    /// A C14 register at c14:0x0070 with the value `value`.
+    fn c14_register(probe: &mut FakeProbe, value: i128) {
+        probe.set("PER.ADDRESS(\".VCR\")", Value::Text("C14:0x700".into()));
+        probe.set("ADDRESS.OFFSET(PER.ADDRESS(\".VCR\"))", Value::Int(0x1C0));
+        probe.set("PER.VALUE(\".VCR\")", Value::Int(value));
+        probe.set("Data.Long(C14:0x0070)", Value::Int(value));
+    }
+
+    #[test]
+    fn a_zero_value_cannot_confirm_the_address() {
+        let mut probe = halted_hyp_probe();
+        c14_register(&mut probe, 0);
+        let names = ["VCR".to_string()];
+        let outcome = run(&mut probe, |ctx| reg(ctx, &names)).unwrap();
+        assert_eq!(
+            outcome.text,
+            "VCR  C14:0x0070 (unconfirmed: the value cannot tell)  0x00000000"
+        );
+        let register = &outcome.json["registers"][0];
+        assert_eq!(register["address"], "C14:0x0070");
+        assert_eq!(register["address_checked"], serde_json::Value::Null);
+        assert_eq!(register["address_check"], "unconfirmed");
+
+        let mut probe = halted_hyp_probe();
+        c14_register(&mut probe, 0x0004_4000);
+        let outcome = run(&mut probe, |ctx| reg(ctx, &names)).unwrap();
+        assert_eq!(outcome.text, "VCR  C14:0x0070        0x00044000");
+        assert_eq!(outcome.json["registers"][0]["address_checked"], true);
+    }
+
+    #[test]
+    fn a_bus_error_fails_the_check_but_not_the_command() {
+        let mut probe = halted_hyp_probe();
+        c14_register(&mut probe, 0x1234);
+        probe.values.remove("Data.Long(C14:0x0070)");
+        probe.errors.insert(
+            "Data.Long(C14:0x0070)".into(),
+            "bus error at address EC14:0x70".into(),
+        );
+        let names = ["VCR".to_string()];
+        let outcome = run(&mut probe, |ctx| reg(ctx, &names)).unwrap();
+        assert_eq!(outcome.code, 0);
+        assert_eq!(outcome.json["registers"][0]["address_check"], "failed");
+        assert_eq!(outcome.json["registers"][0]["value"], 0x1234);
+        assert!(
+            outcome.text.contains("C14:0x700 (PER.ADDRESS text"),
+            "{}",
+            outcome.text
+        );
+    }
+
+    #[test]
+    fn rgroup_registers_are_read_with_per_value() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("perx.per"),
+            "tree \"Timer\"\n  rgroup.long c15:0x000E++0x00\n    line.long 0x00 \"FRQ,Frequency\"\ntree.end\n",
+        )
+        .unwrap();
+        let config = crate::target::tests::make_config(dir.path());
+        let mut probe = halted_hyp_probe();
+        probe.errors.insert(
+            "PER.ADDRESS(\".FRQ\")".into(),
+            "internal error : PAR_256".into(),
+        );
+        probe.set("PER.VALUE(\".FRQ\")", Value::Int(0x3B9A_CA00));
+        probe.set("Data.Long(C15:0x000E)", Value::Int(0x3B9A_CA00));
+        let mut per = PerSnapshot::new(Some(dir.path().to_path_buf()));
+        let mut ctx = Context {
+            probe: &mut probe,
+            per: &mut per,
+            config: &config,
+            cwd: dir.path(),
+        };
+        let names = ["FRQ".to_string()];
+        let outcome = reg(&mut ctx, &names).unwrap();
+        assert_eq!(outcome.text, "FRQ  C15:0x000E        0x3B9ACA00");
+        let register = &outcome.json["registers"][0];
+        assert_eq!(register["address_check"], "confirmed");
+        assert_eq!(register["raw_address"], "(address from the PER file)");
+    }
+
+    #[test]
+    fn duplicate_definitions_are_read_with_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("perx.per"),
+            "tree \"A\"\n  group.long c15:0x1001++0x00\n    line.long 0x00 \"CTRL,Control\"\ntree.end\n\
+             tree \"B\"\n  group.long c15:0x1001++0x00\n    line.long 0x00 \"CTRL,Control\"\ntree.end\n",
+        )
+        .unwrap();
+        let config = crate::target::tests::make_config(dir.path());
+        let mut probe = halted_hyp_probe();
+        probe.errors.insert(
+            "PER.ADDRESS(\".CTRL\")".into(),
+            "Ambiguous keyword 'CTRL'".into(),
+        );
+        probe.set("PER.ADDRESS(\"A.CTRL\")", Value::Text("C15:0x10010".into()));
+        probe.set(
+            "ADDRESS.OFFSET(PER.ADDRESS(\"A.CTRL\"))",
+            Value::Int(0x1001 * 4),
+        );
+        probe.set("PER.VALUE(\"A.CTRL\")", Value::Int(0x1234));
+        probe.set("Data.Long(C15:0x1001)", Value::Int(0x1234));
+        let mut per = PerSnapshot::new(Some(dir.path().to_path_buf()));
+        let mut ctx = Context {
+            probe: &mut probe,
+            per: &mut per,
+            config: &config,
+            cwd: dir.path(),
+        };
+        let names = ["CTRL".to_string()];
+        let outcome = reg(&mut ctx, &names).unwrap();
+        assert_eq!(
+            outcome.text,
+            "CTRL  C15:0x1001        0x00001234\n      \
+             note: defined 2 times in the PER file, all at C15:0x1001; read as 'A.CTRL'"
+        );
+        assert_eq!(outcome.code, 0);
     }
 
     #[test]

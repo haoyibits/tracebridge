@@ -280,7 +280,8 @@ id 回绕：… fe → 00 → 01
 | 6 vscode/rustrover | ✅ | 67bc952 |
 | 7 发布 | ✅ 手写 workflow（理由见下） | 见 git log |
 | 8 debug 会话 + flash 先 Down | ✅ 2026-09-29 在 SR6P6 上跑完验收表（0a6ce79），全部通过 | 见 git log |
-| 8.1 debug 硬件反馈修复 | ✅ 离线测试；待硬件复测（PER.ReProgram、C15 地址、rgroup、fault 无异常） | 见 git log |
+| 8.1 debug 硬件反馈修复 | ✅ 0.1.6 已在硬件上确认 C15 地址、歧义报错、PAR_256 报错、fault 无异常 | 7f15cb2 |
+| 8.2 debug 第二轮修复 | ✅ 离线测试；待硬件复测（ReProgram 按错误触发、C14、rgroup 用 PER.VALUE 读、重复定义自动解析）；复测前不发布 | 见 git log |
 
 **debug 的决定**（2026-09-29，任务说明是本地文件 `tracebridge-debug-prompt.md`，里面有项目数据，不提交；用户让我自己定这些点）：
 - 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`。
@@ -293,9 +294,16 @@ id 回绕：… fe → 00 → 01
 - 退出码：0 正常，1 错误（包括寄存器找不到），2 用法错误，3 check 失败或 verify 有差异。
 - flash：`SYStem.Up()` 为真时先 `SYStem.Down`（`target::program`）。load 不这样做：load 不在目标上运行代码，它的用途就是在不复位的前提下挂到正在运行的程序上。
 - **硬件反馈的修复**（2026-09-29，第 8.1 阶段）：
-  - 在第一个 PER 函数之前，`PER.FILENAME()` 为空或调用失败就执行不带参数的 `PER.ReProgram`，并在 stderr 说明。`tracebridge open` 启动的 PowerView 没有默认 PER 文件。这一步只改调试器状态，所以放在 R 命令的隐式准备里，和 `PER.Set.CONDitions` 一样。
-  - C15 地址：PER.ADDRESS() 的偏移是命令行地址的 4 倍（HVBAR c15:0x400C → 0x10030），它自己的文本（`C15:0x400C0`）不能直接粘贴到命令行。因此按"偏移 ÷ 4、访问类别不变"输出。C14 没有在硬件上确认过，不做换算。`reg` 会用 `Data.Long(<输出的地址>)` 自检，和寄存器的值比较；如果是字段，就和父路径解析到同一地址的那个寄存器的值比较。自检不通过时，输出 PER.ADDRESS 的原始文本并附说明。只有协处理器类别才做自检，内存映射的地址不需要换算。
-  - **PER 文件扫描**（`debug/perfile.rs`）：**只用于生成报错信息**，查找仍然全部交给 PER.ADDRESS/PER.VALUE，所以没有推翻"不写 PER 解析器"那条决定。扫描只处理 `tree`/`tree.open`/`tree.close`/`tree.end`、字面量 `base`、`*group` 和 `line.*` 标签，不解释 `sif`/`if`。对有歧义的名字，列出完整路径和地址；遇到 PAR_256（目前只在 rgroup 上见过），给出可以直接按地址读的写法。文件位置由 `PER.FILENAME()` 加上 `trace32.sys` 得出。
+  - `PER.ReProgram`（第 8.2 阶段改过）：**由错误触发**。`PER.Set.CONDitions` 或 PER 查找报 "No default peripheral file" 时，执行一次不带参数的 `PER.ReProgram`，在 stderr 说明，然后重试。每个连接最多执行一次，REPL 里 `reconnect` 之后重新计数。`PER.FILENAME()` 不能用来判断：硬件上看到，无论是否加载过，它都返回 CPU 的 PER 文件名（CPU 为 NONE 时返回 `per_notify.per`）。这一步只改调试器状态，所以放在 R 命令的隐式准备里，和 `PER.Set.CONDitions` 一样。
+  - C15 地址：PER.ADDRESS() 的偏移是命令行地址的 4 倍（HVBAR c15:0x400C → 0x10030），它自己的文本（`C15:0x400C0`）不能直接粘贴到命令行。因此按"偏移 ÷ 4、访问类别不变"输出。C14 在第 8.2 阶段经硬件确认规则相同（DBGDSCREXT c14:0x0220 → 0x880），也做换算。`reg` 会用 `Data.Long(<输出的地址>)` 自检，和寄存器的值比较；如果是字段，就和它所在寄存器的值比较。自检结果有三种：
+    - confirmed：读到的值相同，且不是 0 或 0xFFFFFFFF。
+    - unconfirmed：值是 0 或 0xFFFFFFFF。错误的地址往往也读到这些值（DBGVCR 在 C14:0x0070 和 C14:0x700 都读到 0），所以不能据此确认地址。
+    - failed：值不同，或者 Data.Long 报错（比如 bus error）。此时输出原始文本并附说明，但不算命令错误。
+    只有协处理器类别才做自检，内存映射的地址不需要换算。
+  - **PER 文件扫描**（`debug/perfile.rs`）：只处理 `tree`/`tree.open`/`tree.close`/`tree.end`、字面量 `base`、`*group`、`line.*` 标签和字段定义行（`*fld`/`hexmask`），不解释 `sif`/`if`。文件位置由 `PER.FILENAME()` 加上 `trace32.sys` 得出。**值始终来自 TRACE32**（PER.VALUE 或 Data.Long），扫描只提供路径和地址，所以没有推翻"不写 PER 解析器"那条决定。第 8.2 阶段起，扫描用在三个地方：
+    1. 报错信息：列出完整路径和地址。
+    2. rgroup（PAR_256）：只有 PER.ADDRESS 失败，PER.VALUE 能用（硬件确认：`PER.VALUE(".CNTFRQ")` = 0x3B9ACA00）。所以值用 PER.VALUE 读，地址取扫描结果，再用 Data.Long 自检。
+    3. 重复定义（可选项，**决定：做**）：TRACE32 报 ambiguous，但所有候选地址相同时，读第一个候选的完整路径，并附注 "defined N times in the PER file, all at <addr>; read as '<path>'"。整个寄存器只要求地址相同，因为同一地址的值不会因定义不同而不同；字段还要求字段定义行完全相同，因为不同定义可能给出不同的位域。否则仍然报错并列出候选。理由：SR6P6 的 per 文件把 HSCTLR 在 4 棵树下重复定义（字段也一样），HMAIR0 重复 2 次，逼用户输入很长的完整路径并没有带来更多安全性。
   - `symbolize`：地址必须落在 `sYmbol.BEGIN..=sYmbol.END` 之内。符号没有大小时，只有偏移小于 0x100 才显示 symbol+offset，否则显示 "(no symbol)"，因为 sYmbol.NAME() 会给出下方最近的符号，哪怕隔得很远。
   - `fault`：HSR = 0 时显示 "no exception recorded"，不再解码 EC。
 

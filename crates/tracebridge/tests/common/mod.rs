@@ -23,6 +23,16 @@ pub struct State {
     pub failing: Vec<String>,
     /// Extra function answers: expression → (result type, text).
     pub functions: HashMap<String, (u32, String)>,
+    /// Commands and functions that fail with this message (T32_ERR_FN1).
+    /// Like TRACE32, `PER.ReProgram` clears "No default peripheral file".
+    pub errors: HashMap<String, String>,
+}
+
+fn error_answer(id: u8, message: &str) -> Vec<u8> {
+    let mut answer = vec![90, id, 0, 0, 0, 0];
+    answer.extend_from_slice(&(message.len() as u32).to_le_bytes());
+    answer.extend_from_slice(message.as_bytes());
+    answer
 }
 
 impl State {
@@ -121,6 +131,14 @@ fn answer(state: &Mutex<State>, data: &[u8]) -> Vec<u8> {
         (0x72, 0x04) => {
             let command = text(payload);
             state.log.push(format!("cmd {command}"));
+            if let Some(message) = state.errors.get(&command) {
+                return error_answer(id, message);
+            }
+            if command == "PER.ReProgram" {
+                state
+                    .errors
+                    .retain(|_, message| !message.contains("No default peripheral file"));
+            }
             if state
                 .failing
                 .iter()
@@ -148,6 +166,9 @@ fn answer(state: &Mutex<State>, data: &[u8]) -> Vec<u8> {
                 "SOFTWARE.BUILD()" | "SOFTWARE.BUILD.BASE()" | "VERSION.PYRCL(1.1.5)"
             ) {
                 state.log.push(format!("fnc {expression}"));
+            }
+            if let Some(message) = state.errors.get(&expression) {
+                return error_answer(id, message);
             }
             let bool_text = |value: bool| if value { "TRUE()" } else { "FALSE()" };
             match expression.as_str() {
