@@ -16,6 +16,7 @@ your project except a `trace32.toml`.
 | `tracebridge rtt` | Bidirectional SEGGER RTT terminal (Ctrl-C to quit) |
 | `tracebridge vscode` | Add the `TRACE32: Attach` debug configuration to `.vscode/` |
 | `tracebridge rustrover` | Add the `TRACE32: Attach` run configuration to `.run/` |
+| `tracebridge debug` | Inspect registers, memory, faults and the flashed image without resetting the target |
 | `tracebridge chips <name>` | Show which flash script `flash` would use for a chip |
 | `tracebridge adapter` | DAP proxy in front of `t32debugadapter`; the IDE starts it |
 
@@ -257,21 +258,67 @@ PowerView that is already running, over the Remote API. It **never resets the
 target**: connecting issues no `SYStem.Up`, `SYStem.Mode Go` or reset, and it
 does not start PowerView (run `tracebridge open`, `flash` or `load` first).
 
-```sh
-tracebridge debug                       # interactive session
-tracebridge debug status                # one command, then exit
-tracebridge debug reg HSR HSCTLR.C C15:0x4025
-tracebridge debug mem my_buffer 8 --json
+### Two ways to use it
+
+**Interactive session**: run `tracebridge debug` without a command, then type
+commands without the `tracebridge debug` prefix:
+
+```text
+$ tracebridge debug
+[tracebridge] connected to PowerView on RCL port 20000; 'help' lists the commands, 'quit' leaves
+t32 [up, running]> break
+halted (now: up, halted)
+t32 [up, halted]> reg HSCTLR HSCTLR.C
+HSCTLR    C15:0x4001        0x30C5183D
+          note: defined 4 times in the PER file, all at C15:0x4001; read as '...'
+HSCTLR.C  C15:0x4001        0x00000001  "Enabled"
+          note: ...
+t32 [up, halted]> go
+running (now: up, running)
+t32 [up, running]> quit
 ```
 
-The session has line editing, history (`.tracebridge/debug_history`), Tab
-completion of command names, and a prompt that shows the debugger state
-(`t32 [up, halted]>`, `t32 [down]>`). A failing command does not end the
-session; after a lost connection, `reconnect` connects again.
+- The prompt shows the debugger state (`t32 [up, halted]>`, `t32 [down]>`,
+  `t32 [disconnected]>`).
+- Tab completes command names. The arrow keys recall earlier lines; the
+  history is kept in `.tracebridge/debug_history`.
+- A failing command does not end the session. After a lost connection,
+  `reconnect` connects again.
+- `help` lists the commands and `help <command>` explains one. `quit`,
+  `exit` or Ctrl-D leaves.
 
-`--json` prints one JSON document per command. Exit codes: 0 ok, 1 error
-(including register not found), 2 usage, 3 a check failed or `verify` found a
-difference.
+**One command**: `tracebridge debug <command> [args]` runs one command and
+exits. Use it in scripts, for acceptance checks, and for AI assistants:
+
+```sh
+tracebridge debug break
+tracebridge debug reg HSR
+tracebridge debug mem my_buffer 8 --json
+tracebridge debug go
+```
+
+Both forms take the same commands and print the same output; the session
+just saves reconnecting and retyping the prefix. `--json` prints one JSON
+document per command. Exit codes: 0 ok, 1 error (including register not
+found), 2 usage, 3 a check failed or `verify` found a difference.
+
+### A typical session
+
+```text
+tracebridge flash                  # program the board (not part of debug)
+tracebridge debug
+t32 [up, running]> verify          # does the board run the ELF you built?
+t32 [up, running]> status          # mode, run state, CPU
+t32 [up, running]> break           # CP15 and core registers need a halted core
+t32 [up, halted]> status           # now also PC with symbol+offset, decoded CPSR
+t32 [up, halted]> fault            # after a crash: vector, HSR decoded, fault address
+t32 [up, halted]> reg HSR HVBAR    # any register by name, or C15:0x4025
+t32 [up, halted]> mem my_buffer 4  # memory at a symbol or address
+t32 [up, halted]> check checks/boot.toml   # your acceptance checks
+t32 [up, halted]> go
+```
+
+### Commands
 
 | Command | Kind | What it does |
 |---|---|---|
@@ -293,7 +340,9 @@ difference.
 There is no `up`, `reset` or `flash` in the session; use the top-level
 commands for those.
 
-**How values are read.** Everything is evaluated by PowerView as PRACTICE
+### How values are read
+
+ Everything is evaluated by PowerView as PRACTICE
 functions (`Data.Long(...)`, `Register(...)`, `PER.VALUE(...)`,
 `sYmbol.BEGIN(...)`), so addresses and access classes mean exactly what they
 mean on the PowerView command line. Register names are looked up with
@@ -362,6 +411,8 @@ Coprocessor (CP15) and core registers can only be read from a halted core.
 The read-only commands never halt it; they say so instead. Only `verify` uses
 the raw memory API, and only for plain memory (`AD:`).
 
+### `verify` and `check`
+
 **`verify`** compares every `PT_LOAD` segment with file content at its load
 address (LMA, `p_paddr`), not its run address, so initialized data that the
 startup code copies to RAM is compared in NVM. It prints `match`, or the first
@@ -388,10 +439,10 @@ variants = ["debug"]                     # optional: only with --variant debug
 The output is one line per check and a summary. `--dry-run` resolves every
 register name (`PER.ADDRESS`) and symbol but reads no register or memory
 value, so it also works while the core runs (only `PER.Set.CONDitions`
-evaluates the PER file's conditions). When a check reads CP15 or core registers and the core is
-running, `check` stops with an error unless `--halt` is given; with `--halt`,
-it runs `Break`, says so, and leaves the core halted (`tracebridge debug go`
-resumes it).
+evaluates the PER file's conditions). When a check reads CP15 or core
+registers and the core is running, `check` stops with an error unless
+`--halt` is given; with `--halt`, it runs `Break`, says so, and leaves the
+core halted (`tracebridge debug go` resumes it).
 
 ### Allowing only the read-only commands (Claude Code)
 
