@@ -814,7 +814,24 @@ pub fn resolve_register(
             return Ok(register);
         }
     }
-    Err(DebugError::new(lookup_error(name, &message, &candidates)))
+    // `.TREE.REG`: TRACE32 only searches register names after a dot.
+    let partial = match per.file() {
+        Some(file) if candidates.is_empty() && !message.to_ascii_lowercase().contains("ambig") => {
+            perfile::scan_partial(file, name)
+        }
+        _ => Vec::new(),
+    };
+    let listed = if partial.is_empty() {
+        &candidates
+    } else {
+        &partial
+    };
+    Err(DebugError::new(lookup_error(
+        name,
+        &message,
+        listed,
+        !partial.is_empty(),
+    )))
 }
 
 /// Candidates listed in a lookup error.
@@ -822,7 +839,13 @@ const LISTED_CANDIDATES: usize = 8;
 
 /// The message for a failed lookup of `name`, from TRACE32's `message` and
 /// what the PER file scan found.
-pub fn lookup_error(name: &str, message: &str, candidates: &[perfile::Candidate]) -> String {
+/// `partial`: the candidates are what a `.TREE.REG` name probably meant.
+pub fn lookup_error(
+    name: &str,
+    message: &str,
+    candidates: &[perfile::Candidate],
+    partial: bool,
+) -> String {
     let trace32 = if message.is_empty() {
         String::new()
     } else {
@@ -855,11 +878,21 @@ pub fn lookup_error(name: &str, message: &str, candidates: &[perfile::Candidate]
             "{name}: TRACE32's PER functions could not resolve this entry (internal error \
              PAR_256; seen for read-only rgroup definitions); read it by address: {by_address}"
         )
+    } else if partial {
+        format!(
+            "{name}: not found in the PER file{trace32}. A leading dot must be followed by a \
+             register name or REGISTER.FIELD, not by a tree name; give the full path from \
+             the root instead"
+        )
     } else {
         format!("{name}: not found in the PER file{trace32}")
     };
     if !candidates.is_empty() && !lower.contains("no default peripheral file") {
-        text.push_str("\n  defined in the PER file as:");
+        text.push_str(if partial {
+            "\n  matching definitions in the PER file:"
+        } else {
+            "\n  defined in the PER file as:"
+        });
         for candidate in candidates.iter().take(LISTED_CANDIDATES) {
             text.push_str(&format!("\n    reg '{}'", candidate.path));
             if let Some(address) = &candidate.address {
@@ -887,8 +920,23 @@ pub fn read_register(probe: &mut dyn Probe, register: &PerRegister) -> DResult<u
     )
 }
 
-/// The BITFLD choice of a field (`PER.VALUE.STRING`), when there is one.
-pub fn read_choice(probe: &mut dyn Probe, register: &PerRegister) -> DResult<Option<String>> {
+/// The text of a BITFLD value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub text: String,
+    /// Taken from the PER file because PER.VALUE.STRING() failed.
+    pub from_per_file: bool,
+}
+
+/// The BITFLD choice of a field with value `value`: `PER.VALUE.STRING`, or
+/// the choice list in the PER file when that fails (TRACE32 answers "Must be
+/// a BITFLD" even for BITFLDs whose value PER.VALUE reads).
+pub fn read_choice(
+    probe: &mut dyn Probe,
+    per: &PerSnapshot,
+    register: &PerRegister,
+    value: u64,
+) -> DResult<Option<Choice>> {
     if !has_several_elements(&register.path) {
         return Ok(None);
     }
@@ -896,13 +944,27 @@ pub fn read_choice(probe: &mut dyn Probe, register: &PerRegister) -> DResult<Opt
         "PER.VALUE.STRING({})",
         practice_string(&register.path)
     )) {
-        Ok(Value::Text(text)) if !text.trim().is_empty() => Ok(Some(text.trim().to_string())),
-        Ok(_) => Ok(None),
+        Ok(Value::Text(text)) if !text.trim().is_empty() => {
+            return Ok(Some(Choice {
+                text: text.trim().to_string(),
+                from_per_file: false,
+            }));
+        }
+        Ok(_) => {}
         Err(error) => {
             let error = DebugError::from(error);
-            if error.lost { Err(error) } else { Ok(None) }
+            if error.lost {
+                return Err(error);
+            }
         }
     }
+    Ok(per
+        .file()
+        .and_then(|file| perfile::scan_field_choice(file, &register.path, value))
+        .map(|text| Choice {
+            text,
+            from_per_file: true,
+        }))
 }
 
 /// The path without its last element (`.HSCTLR.C` → `.HSCTLR`).
@@ -1367,6 +1429,38 @@ tree.end
             "{error}"
         );
         assert!(!error.message.contains("not found"));
+    }
+
+    #[test]
+    fn a_tree_after_the_leading_dot_is_explained() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("perx.per"),
+            "tree \"WDT (Watchdog)\"\ntree \"WDT_0\"\n  base ad:0x40000000\n  group.long 0x0++0x3\n    \
+             line.long 0x0 \"CR,Control\"\ntree.end\ntree \"WDT_1\"\n  base ad:0x40001000\n  \
+             group.long 0x0++0x3\n    line.long 0x0 \"CR,Control\"\ntree.end\ntree.end\n",
+        )
+        .unwrap();
+        let mut per = PerSnapshot::new(Some(dir.path().to_path_buf()));
+        let mut probe = FakeProbe::with(&[
+            ("PER.FILENAME()", Value::Text("perx.per".into())),
+            ("SYStem.Mode()", Value::Int(11)),
+            ("STATE.RUN()", Value::Bool(false)),
+        ]);
+        per.ensure(&mut probe).unwrap();
+        probe.errors.insert(
+            "PER.ADDRESS(\".WDT_0.CR\")".into(),
+            "Keyword 'WDT_0' not found".into(),
+        );
+        let error = resolve_register(&mut probe, &mut per, ".WDT_0.CR").unwrap_err();
+        assert_eq!(
+            error.message,
+            ".WDT_0.CR: not found in the PER file (TRACE32: Keyword 'WDT_0' not found). A \
+             leading dot must be followed by a register name or REGISTER.FIELD, not by a tree \
+             name; give the full path from the root instead\n  \
+             matching definitions in the PER file:\n    \
+             reg '\"WDT (Watchdog)\".WDT_0.CR'  (AD:0x40000000)"
+        );
     }
 
     const MISSING: &str = "No default peripheral file (PER.ReProgram) found.";

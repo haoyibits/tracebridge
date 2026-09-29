@@ -281,7 +281,8 @@ id 回绕：… fe → 00 → 01
 | 7 发布 | ✅ 手写 workflow（理由见下） | 见 git log |
 | 8 debug 会话 + flash 先 Down | ✅ 2026-09-29 在 SR6P6 上跑完验收表（0a6ce79），全部通过 | 见 git log |
 | 8.1 debug 硬件反馈修复 | ✅ 0.1.6 已在硬件上确认 C15 地址、歧义报错、PAR_256 报错、fault 无异常 | 7f15cb2 |
-| 8.2 debug 第二轮修复 | ✅ 离线测试；待硬件复测（ReProgram 按错误触发、C14、rgroup 用 PER.VALUE 读、重复定义自动解析）；复测前不发布 | 见 git log |
+| 8.2 debug 第二轮修复 | ✅ 0.1.7 在硬件上全部确认 | 8cac1b8 |
+| 8.3 BITFLD 文字、部分路径提示 | ✅ 离线测试，并用真实 persr6p6.per 抽查；用户要求修完直接发布（0.1.8），待硬件复测 | 见 git log |
 
 **debug 的决定**（2026-09-29，任务说明是本地文件 `tracebridge-debug-prompt.md`，里面有项目数据，不提交；用户让我自己定这些点）：
 - 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`。
@@ -304,6 +305,8 @@ id 回绕：… fe → 00 → 01
     1. 报错信息：列出完整路径和地址。
     2. rgroup（PAR_256）：只有 PER.ADDRESS 失败，PER.VALUE 能用（硬件确认：`PER.VALUE(".CNTFRQ")` = 0x3B9ACA00）。所以值用 PER.VALUE 读，地址取扫描结果，再用 Data.Long 自检。
     3. 重复定义（可选项，**决定：做**）：TRACE32 报 ambiguous，但所有候选地址相同时，读第一个候选的完整路径，并附注 "defined N times in the PER file, all at <addr>; read as '<path>'"。整个寄存器只要求地址相同，因为同一地址的值不会因定义不同而不同；字段还要求字段定义行完全相同，因为不同定义可能给出不同的位域。否则仍然报错并列出候选。理由：SR6P6 的 per 文件把 HSCTLR 在 4 棵树下重复定义（字段也一样），HMAIR0 重复 2 次，逼用户输入很长的完整路径并没有带来更多安全性。
+  - **BITFLD 文字**（第 8.3 阶段）：硬件上 `PER.VALUE.STRING` 对试过的每个 BITFLD 都报 "Must be a BITFLD"，核心寄存器和外设都一样，而 `PER.VALUE` 对同样的路径都能读出值。现在仍然先调 `PER.VALUE.STRING`，失败了再从扫描到的 `bitfld` 行取选项文字：遵守 `ENUMDELIMITER`，按数值取第几项，`?` 表示这一个值保留，`?...` 表示剩下的全部保留，这两种情况都不显示文字。按点号搜索时，所有定义的选项必须一致才显示；给了完整路径时只看那一处定义。JSON 里有 `choice_source` 字段。
+  - **点号开头加部分路径**（第 8.3 阶段）：TRACE32 规定点号后面只能跟寄存器名或 `REG.FIELD`，所以 `.SWT_SYS_0.CR` 会报 "Keyword 'SWT_SYS_0' not found"。找不到时，把最后一个元素当作寄存器（或者把最后两个当作寄存器加字段），在扫描结果里找树路径里依次包含前面那些元素的定义，报错时说明这条规则，并列出可以直接复制的完整路径和地址。
   - `symbolize`：地址必须落在 `sYmbol.BEGIN..=sYmbol.END` 之内。符号没有大小时，只有偏移小于 0x100 才显示 symbol+offset，否则显示 "(no symbol)"，因为 sYmbol.NAME() 会给出下方最近的符号，哪怕隔得很远。
   - `fault`：HSR = 0 时显示 "no exception recorded"，不再解码 EC。
 

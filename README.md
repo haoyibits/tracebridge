@@ -301,6 +301,16 @@ TRACE32's own `PER.ADDRESS()`/`PER.VALUE()` in the CPU's PER file: `HSR` is
 searched as `.HSR`, `A.B` as `.A.B` and then as a full path. Names are case
 sensitive, and path elements with spaces are quoted:
 `'"TMR (Timer Unit)".TMR_0.CTRL'` (quote the whole argument for the shell).
+A leading dot must be followed by a register name or `REGISTER.FIELD`, never
+by a tree name: TRACE32 rejects `.TMR_0.CTRL`. Peripheral registers whose
+name occurs in many blocks (such as `CR`) need the full path from the root.
+If you write `.TREE.REG` anyway, the error lists the matching full paths.
+
+For a BITFLD field, `reg` also prints the choice text for the value, e.g.
+`HSCTLR.C ... 0x00000001  "Enabled"`. TRACE32's `PER.VALUE.STRING()` is
+tried first. It has failed with "Must be a BITFLD" for every field tried so
+far, so the text usually comes from the field's choice list in the PER file
+(`choice_source` in `--json`).
 
 Before the first PER lookup, tracebridge prepares the debugger's PER state.
 Both steps change debugger state only, never the target, so they are part of
@@ -342,10 +352,11 @@ With `--json`, `address_check` is `confirmed`, `unconfirmed` or `failed`.
   with `PER.VALUE()`, takes the address from the PER file, and self-checks it
   as above. `check` files can use these names too.
 
-The paths and addresses come from a plain text scan of the PER file (trees,
-groups and labels only; `sif`/`if` are not evaluated). The scan is used for
-these fallbacks and for error messages; the value always comes from
-TRACE32's PER functions or `Data.Long`.
+The paths, addresses and choice texts come from a plain text scan of the PER
+file (trees, groups, labels and field definitions only; `sif`/`if` are not
+evaluated). The scan is used for these fallbacks, for choice texts and for
+error messages. The value always comes from TRACE32's PER functions or
+`Data.Long`.
 
 Coprocessor (CP15) and core registers can only be read from a halted core.
 The read-only commands never halt it; they say so instead. Only `verify` uses

@@ -150,7 +150,7 @@ struct RegEntry {
     address_check: AddressCheck,
     note: Option<String>,
     value: Option<u64>,
-    choice: Option<String>,
+    choice: Option<probe::Choice>,
     error: Option<String>,
 }
 
@@ -203,7 +203,7 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
             }
             let value = probe::read_register(probe, &register)?;
             entry.value = Some(value);
-            entry.choice = probe::read_choice(probe, &register)?;
+            entry.choice = probe::read_choice(probe, ctx.per, &register, value)?;
             entry.address_check = probe::verify_address(probe, &register, value)?;
             match (entry.address_check, register.source) {
                 (AddressCheck::Failed, AddressSource::PerAddress) => {
@@ -255,7 +255,7 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
                     let mut line =
                         format!("{:<width$}  {address:<16}  {}", entry.name, hex32(value));
                     if let Some(choice) = &entry.choice {
-                        line.push_str(&format!("  \"{choice}\""));
+                        line.push_str(&format!("  \"{}\"", choice.text));
                     }
                     if let Some(note) = &entry.note {
                         line.push_str(&format!("\n{:<width$}  note: {note}", ""));
@@ -280,7 +280,10 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
                 "note": e.note,
                 "value": e.value,
                 "hex": e.value.map(hex32),
-                "choice": e.choice,
+                "choice": e.choice.as_ref().map(|c| c.text.clone()),
+                "choice_source": e.choice.as_ref().map(|c| {
+                    if c.from_per_file { "per_file" } else { "per_value_string" }
+                }),
                 "error": e.error,
             })
         })
@@ -1054,6 +1057,49 @@ mod tests {
         let register = &outcome.json["registers"][0];
         assert_eq!(register["address_check"], "confirmed");
         assert_eq!(register["raw_address"], "(address from the PER file)");
+    }
+
+    #[test]
+    fn bitfld_text_comes_from_the_per_file_when_trace32_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("perx.per"),
+            "ENUMDELIMITER \",\"\ntree \"Watchdog\"\n  group.long ad:0x40000000++0x3\n    \
+             line.long 0x0 \"CR,Control\"\n      bitfld.long 0x0 0. \"WEN,Enable\" \"Disabled,Enabled\"\n\
+             tree.end\n",
+        )
+        .unwrap();
+        let config = crate::target::tests::make_config(dir.path());
+        let mut probe = halted_hyp_probe();
+        probe.set(
+            "PER.ADDRESS(\".CR.WEN\")",
+            Value::Text("AD:0x40000000".into()),
+        );
+        probe.set(
+            "ADDRESS.OFFSET(PER.ADDRESS(\".CR.WEN\"))",
+            Value::Int(0x4000_0000),
+        );
+        probe.set("PER.VALUE(\".CR.WEN\")", Value::Int(1));
+        // What TRACE32 answers for every BITFLD tried on hardware.
+        probe.errors.insert(
+            "PER.VALUE.STRING(\".CR.WEN\")".into(),
+            "Must be a BITFLD".into(),
+        );
+        let mut per = PerSnapshot::new(Some(dir.path().to_path_buf()));
+        let mut ctx = Context {
+            probe: &mut probe,
+            per: &mut per,
+            config: &config,
+            cwd: dir.path(),
+        };
+        let names = ["CR.WEN".to_string()];
+        let outcome = reg(&mut ctx, &names).unwrap();
+        assert_eq!(
+            outcome.text,
+            "CR.WEN  AD:0x40000000     0x00000001  \"Enabled\""
+        );
+        assert_eq!(outcome.json["registers"][0]["choice"], "Enabled");
+        assert_eq!(outcome.json["registers"][0]["choice_source"], "per_file");
     }
 
     #[test]
