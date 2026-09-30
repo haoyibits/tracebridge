@@ -8,6 +8,8 @@
 //!   what it feeds follows on the right. A signal that comes from another
 //!   row is named, not wired, and the name links to where it is made.
 //! - **By source**: one tree, every clock under the clock it runs from now.
+//!   Its connectors are the paths in use and are drawn bold; a selector also
+//!   names the inputs it does not use, joined to it with thin lines.
 //!
 //! The browser lays both out (nested flex boxes, connectors drawn with
 //! borders), so nothing here measures text. The file loads nothing from the
@@ -19,23 +21,8 @@ use super::clock::{Evaluated, Report, State, format_frequency};
 
 const STYLE: &str = include_str!("../../assets/clock.css");
 
-/// Folds the clocks that run from a clock, and switches the view.
-const SCRIPT: &str = "\
-document.addEventListener('click', (event) => {
-  const view = event.target.closest('.views button');
-  if (view) {
-    document.body.dataset.view = view.dataset.view;
-    for (const button of view.parentElement.children) {
-      button.setAttribute('aria-pressed', String(button === view));
-    }
-    return;
-  }
-  const button = event.target.closest('.fold');
-  if (!button) return;
-  const folded = button.closest('.node').classList.toggle('collapsed');
-  button.textContent = folded ? '+' : '\u{2212}';
-  button.setAttribute('aria-expanded', String(!folded));
-});";
+/// Folds branches and switches the view.
+const SCRIPT: &str = include_str!("../../assets/clock.js");
 
 /// What the page says about the run.
 pub struct Heading<'a> {
@@ -76,6 +63,16 @@ fn step(text: &str) -> String {
 enum View {
     Modules,
     Tree,
+}
+
+impl View {
+    /// Every clock has a box in each view; this tells their ids apart.
+    fn prefix(self) -> &'static str {
+        match self {
+            View::Modules => "m-",
+            View::Tree => "t-",
+        }
+    }
 }
 
 /// The frequency, or the word for the state.
@@ -123,17 +120,31 @@ fn node(report: &Report, clock: &Evaluated, view: View, page: &mut String) {
     } else {
         ""
     };
-    // The module view is where the links between rows lead.
-    let id = match view {
-        View::Modules => format!(" id=\"m-{}\"", escape(&clock.name)),
-        View::Tree => String::new(),
-    };
+    // Where the links of the inputs lead, in each view.
+    let prefix = view.prefix();
     let children = fed(report, clock, view);
+    page.push_str("<div class=\"node\">");
+    // In the tree the input in use is the connector that arrives at the
+    // box; the inputs the selector does not use are named in front of it.
+    if let (View::Tree, Some(selection)) = (view, &clock.selection) {
+        let chosen = clock.parent.is_some();
+        let _ = write!(
+            page,
+            "<div class=\"alts{}\">",
+            if chosen { "" } else { " none" }
+        );
+        for (code, name) in &selection.options {
+            if *code != selection.value {
+                input(report, view, Some(*code), name, false, page);
+            }
+        }
+        page.push_str("</div>");
+    }
     // Writing to a String cannot fail.
     let _ = write!(
         page,
-        "<div class=\"node\"><div class=\"box {state}{kind}\"{id}>\
-         <div class=\"head\"><span class=\"name\">{}</span><span class=\"freq\">{}</span></div>",
+        "<div class=\"box {state}{kind}\" id=\"{prefix}{0}\">\
+         <div class=\"head\"><span class=\"name\">{0}</span><span class=\"freq\">{1}</span></div>",
         escape(&clock.name),
         escape(&value(clock))
     );
@@ -144,23 +155,6 @@ fn node(report: &Report, clock: &Evaluated, view: View, page: &mut String) {
             escape(&selection.field),
             selection.value
         );
-        // The module view lists the sources as the inputs of the row.
-        if view == View::Tree {
-            page.push_str("<div class=\"opts\">");
-            for (value, name) in &selection.options {
-                let selected = if *value == selection.value {
-                    " sel"
-                } else {
-                    ""
-                };
-                let _ = write!(
-                    page,
-                    "<span class=\"opt{selected}\">{value} {}</span>",
-                    escape(name)
-                );
-            }
-            page.push_str("</div>");
-        }
     }
     if !clock.steps.is_empty() {
         let steps: Vec<String> = clock.steps.iter().map(|text| step(text)).collect();
@@ -200,15 +194,23 @@ fn node(report: &Report, clock: &Evaluated, view: View, page: &mut String) {
 
 /// One input of a row: the selector value that picks it, the clock's name
 /// as a link to where it is made, and its frequency.
-fn input(report: &Report, code: Option<u64>, name: &str, selected: bool, page: &mut String) {
+fn input(
+    report: &Report,
+    view: View,
+    code: Option<u64>,
+    name: &str,
+    selected: bool,
+    page: &mut String,
+) {
     let class = if selected { "in sel" } else { "in" };
+    let prefix = view.prefix();
     let code = code
         .map(|code| format!("<span class=\"code\">{code}</span>"))
         .unwrap_or_default();
     let frequency = find(report, name).map(value).unwrap_or_default();
     let _ = write!(
         page,
-        "<a class=\"{class}\" href=\"#m-{0}\">{code}<span>{0}</span><b>{1}</b></a>",
+        "<a class=\"{class}\" href=\"#{prefix}{0}\">{code}<span>{0}</span><b>{1}</b></a>",
         escape(name),
         escape(&frequency)
     );
@@ -220,7 +222,14 @@ fn row(report: &Report, clock: &Evaluated, page: &mut String) {
     if let Some(selection) = &clock.selection {
         page.push_str("<div class=\"inputs\">");
         for (code, name) in &selection.options {
-            input(report, Some(*code), name, *code == selection.value, page);
+            input(
+                report,
+                View::Modules,
+                Some(*code),
+                name,
+                *code == selection.value,
+                page,
+            );
         }
         if !selection
             .options
@@ -237,7 +246,7 @@ fn row(report: &Report, clock: &Evaluated, page: &mut String) {
         page.push_str("</div>");
     } else if let Some(parent) = &clock.parent {
         page.push_str("<div class=\"inputs\">");
-        input(report, None, parent, true, page);
+        input(report, View::Modules, None, parent, true, page);
         page.push_str("</div>");
     }
     node(report, clock, View::Modules, page);
@@ -322,6 +331,10 @@ pub fn render(report: &Report, heading: &Heading) -> String {
          <span><i class=\"key\"></i>multiplier or divider</span>\
          <span><i class=\"key off\"></i>off</span>\
          <span><i class=\"key unknown\"></i>frequency unknown</span>\
+         </p>\n\
+         <p class=\"legend lines\">\
+         <span><i class=\"stroke\"></i>the path in use</span>\
+         <span><i class=\"stroke thin\"></i>an input the selector does not use</span>\
          </p>\n</header>\n",
     );
     if grouped {
@@ -419,22 +432,26 @@ enable = \"DIV[30]\"
         // A source, with its note escaped.
         assert!(
             html.contains(
-                "<div class=\"box on source\"><div class=\"head\"><span class=\"name\">OSC</span>\
+                "<div class=\"box on source\" id=\"t-OSC\"><div class=\"head\"><span class=\"name\">OSC</span>\
              <span class=\"freq\">8 MHz</span></div><div class=\"how\">given</div>\
              <div class=\"note\">crystal &lt;8..40 MHz&gt;</div>"
             ),
             "{html}"
         );
-        // The selector lists its sources; the chosen one is marked.
+        // The selector is drawn under the source in use (OSC); the input it
+        // does not use is named in front of its box, with a link to the
+        // box that makes it.
         assert!(
             html.contains(
-                "<div class=\"box on mux\"><div class=\"head\"><span class=\"name\">MUX</span>\
-             <span class=\"freq\">8 MHz</span></div><div class=\"how\">SEL[3:0] = 1</div>\
-             <div class=\"opts\"><span class=\"opt\">0 IRC</span>\
-             <span class=\"opt sel\">1 OSC</span></div>"
+                "<div class=\"children\"><div class=\"node\"><div class=\"alts\">\
+             <a class=\"in\" href=\"#t-IRC\"><span class=\"code\">0</span><span>IRC</span><b>16 MHz</b></a>\
+             </div><div class=\"box on mux\" id=\"t-MUX\"><div class=\"head\">\
+             <span class=\"name\">MUX</span>\
+             <span class=\"freq\">8 MHz</span></div><div class=\"how\">SEL[3:0] = 1</div>"
             ),
             "{html}"
         );
+        assert_eq!(html.matches("class=\"alts").count(), 1);
         // 8 MHz x 3 / 4, with the warning.
         assert!(
             html.contains(
@@ -445,7 +462,7 @@ enable = \"DIV[30]\"
         );
         assert!(
             html.contains(
-                "<div class=\"box off\"><div class=\"head\"><span class=\"name\">AUX</span>\
+                "<div class=\"box off\" id=\"t-AUX\"><div class=\"head\"><span class=\"name\">AUX</span>\
              <span class=\"freq\">off</span></div><div class=\"why\">DIV[30] = 0</div>"
             ),
             "{html}"
@@ -474,15 +491,24 @@ enable = \"DIV[30]\"
             ),
             "{html}"
         );
-        assert!(html.contains(
-            "<div class=\"box unknown source\"><div class=\"head\"><span class=\"name\">OSC</span>\
-             <span class=\"freq\">?</span></div><div class=\"why\">frequency not given</div>"
-        ), "{html}");
-        // The selector shows a value that is none of its sources.
         assert!(
             html.contains(
-                "<div class=\"how\">SEL[3:0] = 7</div><div class=\"opts\">\
-             <span class=\"opt\">0 IRC</span><span class=\"opt\">1 OSC</span></div>\
+                "<div class=\"box unknown source\" id=\"t-OSC\"><div class=\"head\">\
+             <span class=\"name\">OSC</span>\
+             <span class=\"freq\">?</span></div><div class=\"why\">frequency not given</div>"
+            ),
+            "{html}"
+        );
+        // The selector shows a value that is none of its sources: no input
+        // is in use, so both are named and no connector arrives.
+        assert!(
+            html.contains(
+                "<div class=\"node\"><div class=\"alts none\">\
+             <a class=\"in\" href=\"#t-IRC\"><span class=\"code\">0</span><span>IRC</span><b>16 MHz</b></a>\
+             <a class=\"in\" href=\"#t-OSC\"><span class=\"code\">1</span><span>OSC</span><b>?</b></a>\
+             </div><div class=\"box unknown mux\" id=\"t-MUX\"><div class=\"head\">\
+             <span class=\"name\">MUX</span><span class=\"freq\">?</span></div>\
+             <div class=\"how\">SEL[3:0] = 7</div>\
              <div class=\"why\">this source is not described</div>"
             ),
             "{html}"
@@ -535,9 +561,17 @@ enable = \"DIV[30]\"
              <a class=\"in sel\" href=\"#m-OSC\"><span class=\"code\">1</span><span>OSC</span><b>8 MHz</b></a>\
              </div><div class=\"node\"><div class=\"box on mux\" id=\"m-MUX\">"
         ), "{modules}");
-        // The inputs replace the list of sources inside the box.
-        assert!(!modules.contains("class=\"opts\""), "{modules}");
-        assert!(tree.contains("class=\"opts\""), "{tree}");
+        // The tree draws the input in use as its connector and names only
+        // the other one; its links stay within the tree.
+        assert!(!modules.contains("class=\"alts"), "{modules}");
+        assert!(
+            tree.contains(
+                "<div class=\"alts\"><a class=\"in\" href=\"#t-IRC\"><span class=\"code\">0</span>\
+                 <span>IRC</span><b>16 MHz</b></a></div><div class=\"box on mux\" id=\"t-MUX\">"
+            ),
+            "{tree}"
+        );
+        assert!(!tree.contains("#m-"), "{tree}");
         // OUT stays next to MUX; AUX is in another group, so it starts a
         // row that names its source.
         assert!(
@@ -561,13 +595,15 @@ enable = \"DIV[30]\"
             ),
             "{modules}"
         );
-        // Every link has its target, once.
+        // Every link has its target, once in each view.
         for name in ["OSC", "IRC", "MUX", "OUT", "AUX"] {
-            assert_eq!(
-                html.matches(&format!("id=\"m-{name}\"")).count(),
-                1,
-                "{name}"
-            );
+            for prefix in ["m-", "t-"] {
+                assert_eq!(
+                    html.matches(&format!("id=\"{prefix}{name}\"")).count(),
+                    1,
+                    "{prefix}{name}"
+                );
+            }
         }
         assert_eq!(html.matches("<div").count(), html.matches("</div>").count());
     }

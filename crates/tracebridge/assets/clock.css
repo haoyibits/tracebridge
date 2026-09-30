@@ -17,6 +17,10 @@
   --tap: 19px;
   --reach: 26px;
   --gap: 10px;
+  /* The connectors of the boxes. */
+  --wire: 2px;
+  --wire-color: var(--line);
+  --actual: #3d4656;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -33,6 +37,7 @@
     --bad: #e06c75;
     --shadow: none;
     --group: rgb(255 255 255 / 0.035);
+    --actual: #c3cad6;
   }
 }
 * {
@@ -97,14 +102,27 @@ h1 span {
   border-color: var(--warn);
   border-style: dashed;
 }
+/* The two kinds of line of the view by source. */
+.stroke {
+  display: inline-block;
+  width: 22px;
+  margin-right: 5px;
+  vertical-align: middle;
+  border-top: 3px solid var(--actual);
+}
+.stroke.thin {
+  border-top: 2px solid var(--line);
+}
+body[data-view="modules"] .lines {
+  display: none;
+}
 .missing {
   color: var(--warn);
   font-weight: 600;
 }
 code,
 .name,
-.how,
-.opt {
+.how {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -259,12 +277,46 @@ a.in:hover span:not(.code) {
 /* The tree grows to the right: a node is its box and, next to it, the
    column of the clocks that run from it. A clock and the first clock it
    feeds share one line, so the main path reads straight across and the
-   source clocks stay in view. */
+   source clocks stay in view.
+
+   Its connectors are the paths in use, so they are drawn bold. */
 .tree {
+  --wire: 3px;
+  --wire-color: var(--actual);
   display: inline-flex;
   flex-direction: column;
   gap: 22px;
   padding: 14px 24px 40px;
+}
+/* The inputs a selector does not use, in front of its box: the input in use
+   is the bold connector that passes over the list, the others are named and
+   join it with thin lines, as the inputs of a row do in the module view. */
+.alts {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: calc(var(--tap) + 9px) 0 2px 8px;
+}
+.alts::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: var(--tap);
+  border-top: var(--wire) solid var(--wire-color);
+}
+/* No input in use: nothing arrives. */
+.alts.none::before {
+  display: none;
+}
+.alts .in:first-child::after,
+.alts .in:first-child:last-child::after {
+  display: block;
+  top: -9px;
+}
+.alts .in:first-child:last-child::after {
+  height: 20px;
 }
 .node {
   position: relative;
@@ -288,7 +340,7 @@ a.in:hover span:not(.code) {
   left: calc(-1 * var(--reach));
   top: var(--tap);
   width: var(--reach);
-  border-top: 2px solid var(--line);
+  border-top: var(--wire) solid var(--wire-color);
 }
 .children > .node {
   padding-left: var(--reach);
@@ -300,7 +352,7 @@ a.in:hover span:not(.code) {
   left: 0;
   top: var(--tap);
   width: var(--reach);
-  border-top: 2px solid var(--line);
+  border-top: var(--wire) solid var(--wire-color);
 }
 /* The vertical line: it bridges the gaps, starts at the first child's
    connector and ends at the last child's. */
@@ -310,14 +362,14 @@ a.in:hover span:not(.code) {
   left: 0;
   top: calc(-0.5 * var(--gap));
   bottom: calc(-0.5 * var(--gap));
-  border-left: 2px solid var(--line);
+  border-left: var(--wire) solid var(--wire-color);
 }
 .children > .node:first-child::after {
   top: var(--tap);
 }
 .children > .node:last-child::after {
   bottom: auto;
-  height: calc(var(--tap) + 0.5 * var(--gap) + 2px);
+  height: calc(var(--tap) + 0.5 * var(--gap) + var(--wire));
 }
 .children > .node:only-child::after {
   display: none;
@@ -361,29 +413,6 @@ a.in:hover span:not(.code) {
   font-size: 11.5px;
   color: var(--dim);
   overflow-wrap: anywhere;
-}
-.opts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
-  margin: 4px 0 1px;
-}
-.opt {
-  padding: 0 5px;
-  border-radius: 4px;
-  background: var(--chip);
-  color: var(--dim);
-  font-size: 10.5px;
-}
-.opt.sel {
-  background: var(--mux);
-  color: #fff;
-  font-weight: 600;
-}
-@media (prefers-color-scheme: dark) {
-  .opt.sel {
-    color: #1b1f27;
-  }
 }
 .alert {
   font-size: 11.5px;

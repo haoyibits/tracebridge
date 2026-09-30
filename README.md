@@ -505,7 +505,10 @@ XOSC            8 MHz    given  ; crystal: the board decides
     on the right. A source from another row is named, and the name links to
     where that clock is made.
   - **By source**: one tree from the source clocks on the left to the clocks
-    they feed, each clock under the clock it runs from right now.
+    they feed, each clock under the clock it runs from right now. The bold
+    lines are the paths in use. In front of a selector, the inputs it does
+    not use are named with their frequencies and joined to it with thin
+    lines.
 
 tracebridge contains no chip: the tree comes from a **description file**,
 chosen like the flash scripts. `--tree <file>` names one; otherwise the file
