@@ -29,6 +29,8 @@
 //! enable = "PLLCR[8]"                  # 0 means the clock is off
 //! warn = [{ when = "PLLSR[2] == 0", text = "not locked" }]
 //! note = "optional"
+//! group = "optional"                   # the block of the chip it belongs to,
+//!                                      # for the diagram of --html
 //! ```
 //!
 //! Expressions take numbers, register fields (`REG[hi:lo]`, `REG[bit]`, `REG`),
@@ -304,6 +306,9 @@ pub struct Warning {
 pub struct Clock {
     pub name: String,
     pub note: Option<String>,
+    /// The block of the chip the clock belongs to (a clock generation
+    /// module, say); the diagram draws one panel per group.
+    pub group: Option<String>,
     pub source: Source,
     mul: Option<Expr>,
     div: Option<Expr>,
@@ -342,8 +347,8 @@ fn expression(table: &Table, key: &str) -> Result<Option<Expr>, String> {
 }
 
 fn parse_clock(table: &Table) -> Result<Clock, String> {
-    const KEYS: [&str; 10] = [
-        "name", "note", "hz", "from", "select", "sources", "mul", "div", "enable", "warn",
+    const KEYS: [&str; 11] = [
+        "name", "note", "group", "hz", "from", "select", "sources", "mul", "div", "enable", "warn",
     ];
     if let Some(key) = table.keys().find(|key| !KEYS.contains(&key.as_str())) {
         return Err(format!("unknown key '{key}'"));
@@ -414,6 +419,7 @@ fn parse_clock(table: &Table) -> Result<Clock, String> {
     Ok(Clock {
         name,
         note: string(table, "note")?.map(str::to_string),
+        group: string(table, "group")?.map(str::to_string),
         source,
         mul: expression(table, "mul")?,
         div: expression(table, "div")?,
@@ -696,6 +702,7 @@ pub struct Selection {
 pub struct Evaluated {
     pub name: String,
     pub note: Option<String>,
+    pub group: Option<String>,
     /// A source clock: it runs from no other clock of the tree.
     pub root: bool,
     /// The clock it runs from, when that is known.
@@ -776,6 +783,7 @@ impl Evaluator<'_> {
         let mut result = Evaluated {
             name: clock.name.clone(),
             note: clock.note.clone(),
+            group: clock.group.clone(),
             root: matches!(clock.source, Source::Root { .. }),
             parent: None,
             selection: None,
@@ -1085,6 +1093,7 @@ impl Report {
                     "how": clock.how(),
                     "warnings": clock.warnings,
                     "note": clock.note,
+                    "group": clock.group,
                 })
             })
             .collect();

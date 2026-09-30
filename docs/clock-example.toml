@@ -26,8 +26,12 @@ BUSDIV = "AD:0x40001010" # [31] enable, [18:16] DIV
 TIMDIV = "AD:0x40001014" # [31] enable, [18:16] DIV
 
 # A source with a frequency the chip fixes. IRC=<frequency> overrides it.
+# `group` is optional: the block of the chip the clock belongs to. The
+# diagram of --html draws one panel per group, like the clock figures of a
+# reference manual.
 [[clock]]
 name = "IRC"
+group = "Oscillators"
 hz = "16MHz"
 enable = "CTL[0]"
 note = "internal RC oscillator"
@@ -35,12 +39,14 @@ note = "internal RC oscillator"
 # A source without `hz`: only the board knows its frequency.
 [[clock]]
 name = "XOSC"
+group = "Oscillators"
 enable = "CTL[1]"
 note = "crystal: the board decides"
 
 # A selector: the field value picks the source.
 [[clock]]
 name = "PLL"
+group = "PLL"
 select = "CLKSEL[24]"
 sources = { "0" = "IRC", "1" = "XOSC" }
 mul = "PLLDV[6:0]"
@@ -53,6 +59,7 @@ warn = [{ when = "PLLSR[2] == 0", text = "not locked" }]
 # An expression may compare: here the field value 3 means "stopped".
 [[clock]]
 name = "SYSCLK"
+group = "System clocks"
 select = "CLKSEL[1:0]"
 sources = { "0" = "IRC", "1" = "XOSC", "2" = "PLL" }
 enable = "CLKSEL[1:0] != 3"
@@ -61,6 +68,7 @@ note = "core clock"
 # A fixed source and a divider that divides by DIV + 1.
 [[clock]]
 name = "BUS"
+group = "System clocks"
 from = "SYSCLK"
 div = "BUSDIV[18:16] + 1"
 enable = "BUSDIV[31]"
@@ -68,6 +76,7 @@ note = "peripheral bus"
 
 [[clock]]
 name = "TIMER"
+group = "System clocks"
 from = "SYSCLK"
 div = "TIMDIV[18:16] + 1"
 enable = "TIMDIV[31]"

@@ -1,9 +1,17 @@
 //! `clock --html`: the clock tree as a diagram, one self-contained HTML file.
 //!
-//! The tree grows from the source clocks on the left to the clocks they feed
-//! on the right, like the clock view of a vendor's configuration tool. The
-//! browser lays it out (nested flex boxes, connectors drawn with borders), so
-//! nothing here measures text. The file loads nothing from the network.
+//! Two views of the same clocks:
+//!
+//! - **By module**, when the description names groups: one panel per group,
+//!   as a reference manual draws a clock generation module. Every selector
+//!   starts a row with all its inputs on the left, the chosen one marked;
+//!   what it feeds follows on the right. A signal that comes from another
+//!   row is named, not wired, and the name links to where it is made.
+//! - **By source**: one tree, every clock under the clock it runs from now.
+//!
+//! The browser lays both out (nested flex boxes, connectors drawn with
+//! borders), so nothing here measures text. The file loads nothing from the
+//! network.
 
 use std::fmt::Write;
 
@@ -11,9 +19,17 @@ use super::clock::{Evaluated, Report, State, format_frequency};
 
 const STYLE: &str = include_str!("../../assets/clock.css");
 
-/// Folds and unfolds the clocks that run from a clock.
+/// Folds the clocks that run from a clock, and switches the view.
 const SCRIPT: &str = "\
 document.addEventListener('click', (event) => {
+  const view = event.target.closest('.views button');
+  if (view) {
+    document.body.dataset.view = view.dataset.view;
+    for (const button of view.parentElement.children) {
+      button.setAttribute('aria-pressed', String(button === view));
+    }
+    return;
+  }
   const button = event.target.closest('.fold');
   if (!button) return;
   const folded = button.closest('.node').classList.toggle('collapsed');
@@ -56,12 +72,49 @@ fn step(text: &str) -> String {
     }
 }
 
-fn node(report: &Report, clock: &Evaluated, page: &mut String) {
-    let (state, value, why) = match &clock.state {
-        State::Hz(hz) => ("on", format_frequency(*hz), None),
-        State::Off(reason) => ("off", "off".to_string(), Some(reason)),
-        State::Unknown(reason) => ("unknown", "?".to_string(), Some(reason)),
-        State::Error(reason) => ("error", "error".to_string(), Some(reason)),
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Modules,
+    Tree,
+}
+
+/// The frequency, or the word for the state.
+fn value(clock: &Evaluated) -> String {
+    match &clock.state {
+        State::Hz(hz) => format_frequency(*hz),
+        State::Off(_) => "off".to_string(),
+        State::Unknown(_) => "?".to_string(),
+        State::Error(_) => "error".to_string(),
+    }
+}
+
+fn find<'a>(report: &'a Report, name: &str) -> Option<&'a Evaluated> {
+    report.clocks.iter().find(|clock| clock.name == name)
+}
+
+/// In the module view a clock starts a row of its own when it is a source
+/// or a selector, or when what feeds it belongs to another group.
+fn starts_row(report: &Report, clock: &Evaluated) -> bool {
+    match clock.parent.as_deref().and_then(|name| find(report, name)) {
+        None => true,
+        Some(parent) => clock.selection.is_some() || parent.group != clock.group,
+    }
+}
+
+/// The clocks drawn to the right of `clock`.
+fn fed<'a>(report: &'a Report, clock: &'a Evaluated, view: View) -> Vec<&'a Evaluated> {
+    report
+        .children(Some(&clock.name))
+        .filter(|child| view == View::Tree || !starts_row(report, child))
+        .collect()
+}
+
+fn node(report: &Report, clock: &Evaluated, view: View, page: &mut String) {
+    let (state, why) = match &clock.state {
+        State::Hz(_) => ("on", None),
+        State::Off(reason) => ("off", Some(reason)),
+        State::Unknown(reason) => ("unknown", Some(reason)),
+        State::Error(reason) => ("error", Some(reason)),
     };
     let kind = if clock.root {
         " source"
@@ -70,35 +123,44 @@ fn node(report: &Report, clock: &Evaluated, page: &mut String) {
     } else {
         ""
     };
-    let children: Vec<&Evaluated> = report.children(Some(&clock.name)).collect();
+    // The module view is where the links between rows lead.
+    let id = match view {
+        View::Modules => format!(" id=\"m-{}\"", escape(&clock.name)),
+        View::Tree => String::new(),
+    };
+    let children = fed(report, clock, view);
     // Writing to a String cannot fail.
     let _ = write!(
         page,
-        "<div class=\"node\"><div class=\"box {state}{kind}\">\
+        "<div class=\"node\"><div class=\"box {state}{kind}\"{id}>\
          <div class=\"head\"><span class=\"name\">{}</span><span class=\"freq\">{}</span></div>",
         escape(&clock.name),
-        escape(&value)
+        escape(&value(clock))
     );
     if let Some(selection) = &clock.selection {
         let _ = write!(
             page,
-            "<div class=\"how\">{} = {}</div><div class=\"opts\">",
+            "<div class=\"how\">{} = {}</div>",
             escape(&selection.field),
             selection.value
         );
-        for (value, name) in &selection.options {
-            let selected = if *value == selection.value {
-                " sel"
-            } else {
-                ""
-            };
-            let _ = write!(
-                page,
-                "<span class=\"opt{selected}\">{value} {}</span>",
-                escape(name)
-            );
+        // The module view lists the sources as the inputs of the row.
+        if view == View::Tree {
+            page.push_str("<div class=\"opts\">");
+            for (value, name) in &selection.options {
+                let selected = if *value == selection.value {
+                    " sel"
+                } else {
+                    ""
+                };
+                let _ = write!(
+                    page,
+                    "<span class=\"opt{selected}\">{value} {}</span>",
+                    escape(name)
+                );
+            }
+            page.push_str("</div>");
         }
-        page.push_str("</div>");
     }
     if !clock.steps.is_empty() {
         let steps: Vec<String> = clock.steps.iter().map(|text| step(text)).collect();
@@ -129,23 +191,94 @@ fn node(report: &Report, clock: &Evaluated, page: &mut String) {
     if !children.is_empty() {
         page.push_str("<div class=\"children\">");
         for child in children {
-            node(report, child, page);
+            node(report, child, view, page);
         }
         page.push_str("</div>");
     }
     page.push_str("</div>\n");
 }
 
+/// One input of a row: the selector value that picks it, the clock's name
+/// as a link to where it is made, and its frequency.
+fn input(report: &Report, code: Option<u64>, name: &str, selected: bool, page: &mut String) {
+    let class = if selected { "in sel" } else { "in" };
+    let code = code
+        .map(|code| format!("<span class=\"code\">{code}</span>"))
+        .unwrap_or_default();
+    let frequency = find(report, name).map(value).unwrap_or_default();
+    let _ = write!(
+        page,
+        "<a class=\"{class}\" href=\"#m-{0}\">{code}<span>{0}</span><b>{1}</b></a>",
+        escape(name),
+        escape(&frequency)
+    );
+}
+
+/// A row of the module view: the inputs, then the clock and what it feeds.
+fn row(report: &Report, clock: &Evaluated, page: &mut String) {
+    page.push_str("<div class=\"row\">");
+    if let Some(selection) = &clock.selection {
+        page.push_str("<div class=\"inputs\">");
+        for (code, name) in &selection.options {
+            input(report, Some(*code), name, *code == selection.value, page);
+        }
+        if !selection
+            .options
+            .iter()
+            .any(|(code, _)| *code == selection.value)
+        {
+            let _ = write!(
+                page,
+                "<span class=\"in sel unknown\"><span class=\"code\">{}</span>\
+                 <span>not described</span><b>?</b></span>",
+                selection.value
+            );
+        }
+        page.push_str("</div>");
+    } else if let Some(parent) = &clock.parent {
+        page.push_str("<div class=\"inputs\">");
+        input(report, None, parent, true, page);
+        page.push_str("</div>");
+    }
+    node(report, clock, View::Modules, page);
+    page.push_str("</div>\n");
+}
+
+/// The module view: a panel per group, in the order the groups appear.
+fn modules(report: &Report, page: &mut String) {
+    let mut groups: Vec<&Option<String>> = Vec::new();
+    for clock in &report.clocks {
+        if !groups.contains(&&clock.group) {
+            groups.push(&clock.group);
+        }
+    }
+    page.push_str("<main class=\"modules\">\n");
+    for group in groups {
+        let title = group.as_deref().unwrap_or("Other clocks");
+        let _ = writeln!(page, "<section class=\"panel\"><h2>{}</h2>", escape(title));
+        for clock in &report.clocks {
+            if &clock.group == group && starts_row(report, clock) {
+                row(report, clock, page);
+            }
+        }
+        page.push_str("</section>\n");
+    }
+    page.push_str("</main>\n");
+}
+
 /// The whole page.
 pub fn render(report: &Report, heading: &Heading) -> String {
+    // Without groups there are no modules to draw.
+    let grouped = report.clocks.iter().any(|clock| clock.group.is_some());
+    let view = if grouped { "modules" } else { "tree" };
     let mut page = String::new();
     let title = escape(heading.title);
     let _ = write!(
         page,
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>Clock tree: {title}</title>\n<style>\n{STYLE}</style>\n</head>\n<body>\n\
-         <header>\n<h1>Clock tree <span>{title}</span></h1>\n"
+         <title>Clock tree: {title}</title>\n<style>\n{STYLE}</style>\n</head>\n\
+         <body data-view=\"{view}\">\n<header>\n<h1>Clock tree <span>{title}</span></h1>\n"
     );
     let inputs: Vec<String> = heading
         .inputs
@@ -174,6 +307,14 @@ pub fn render(report: &Report, heading: &Heading) -> String {
             escape(&report.missing.join(", "))
         );
     }
+    if grouped {
+        page.push_str(
+            "<p class=\"views\">\
+             <button type=\"button\" data-view=\"modules\" aria-pressed=\"true\">By module</button>\
+             <button type=\"button\" data-view=\"tree\" aria-pressed=\"false\">By source</button>\
+             </p>\n",
+        );
+    }
     page.push_str(
         "<p class=\"legend\">\
          <span><i class=\"key source\"></i>source clock</span>\
@@ -181,10 +322,14 @@ pub fn render(report: &Report, heading: &Heading) -> String {
          <span><i class=\"key\"></i>multiplier or divider</span>\
          <span><i class=\"key off\"></i>off</span>\
          <span><i class=\"key unknown\"></i>frequency unknown</span>\
-         </p>\n</header>\n<main class=\"tree\">\n",
+         </p>\n</header>\n",
     );
+    if grouped {
+        modules(report, &mut page);
+    }
+    page.push_str("<main class=\"tree\">\n");
     for root in report.children(None) {
-        node(report, root, &mut page);
+        node(report, root, View::Tree, &mut page);
     }
     let _ = write!(
         page,
@@ -312,6 +457,10 @@ enable = \"DIV[30]\"
         // Nothing is loaded from elsewhere.
         assert!(!html.contains("http"), "{html}");
         assert!(!html.contains("class=\"missing\""));
+        // No groups in the description: the tree only, and no switch.
+        assert!(html.contains("<body data-view=\"tree\">"), "{html}");
+        assert!(!html.contains("class=\"modules\""));
+        assert!(!html.contains("class=\"views\""));
     }
 
     #[test]
@@ -338,6 +487,99 @@ enable = \"DIV[30]\"
             ),
             "{html}"
         );
+    }
+
+    /// DEMO with the oscillators in one group and the rest in another.
+    fn grouped() -> String {
+        let mut description = DEMO.to_string();
+        for (name, group) in [
+            ("OSC", "Oscillators"),
+            ("IRC", "Oscillators"),
+            ("MUX", "Outputs"),
+            ("OUT", "Outputs"),
+            ("AUX", "Spare"),
+        ] {
+            description = description.replace(
+                &format!("name = \"{name}\"\n"),
+                &format!("name = \"{name}\"\ngroup = \"{group}\"\n"),
+            );
+        }
+        description
+    }
+
+    #[test]
+    fn groups_are_drawn_as_modules() {
+        let inputs = [("OSC".to_string(), 8e6)];
+        let html = page(
+            &grouped(),
+            &[("AD:0x10", 1), ("AD:0x14", 0xC000_0103)],
+            &inputs,
+        );
+        // The module view comes first and is the one shown.
+        assert!(html.contains("<body data-view=\"modules\">"), "{html}");
+        assert!(html.contains(
+            "<button type=\"button\" data-view=\"modules\" aria-pressed=\"true\">By module</button>"
+        ));
+        let (modules, tree) = html.split_once("<main class=\"tree\">").unwrap();
+        let titles: Vec<&str> = modules
+            .split("<h2>")
+            .skip(1)
+            .map(|rest| rest.split("</h2>").next().unwrap())
+            .collect();
+        assert_eq!(titles, ["Oscillators", "Outputs", "Spare"]);
+        // The selector's row: every source as an input, the chosen one
+        // marked, each a link to the box that makes it.
+        assert!(modules.contains(
+            "<div class=\"row\"><div class=\"inputs\">\
+             <a class=\"in\" href=\"#m-IRC\"><span class=\"code\">0</span><span>IRC</span><b>16 MHz</b></a>\
+             <a class=\"in sel\" href=\"#m-OSC\"><span class=\"code\">1</span><span>OSC</span><b>8 MHz</b></a>\
+             </div><div class=\"node\"><div class=\"box on mux\" id=\"m-MUX\">"
+        ), "{modules}");
+        // The inputs replace the list of sources inside the box.
+        assert!(!modules.contains("class=\"opts\""), "{modules}");
+        assert!(tree.contains("class=\"opts\""), "{tree}");
+        // OUT stays next to MUX; AUX is in another group, so it starts a
+        // row that names its source.
+        assert!(
+            modules.contains(
+                "<div class=\"children\"><div class=\"node\"><div class=\"box on\" id=\"m-OUT\">"
+            ),
+            "{modules}"
+        );
+        assert!(
+            modules.contains(
+                "<div class=\"row\"><div class=\"inputs\">\
+             <a class=\"in sel\" href=\"#m-MUX\"><span>MUX</span><b>8 MHz</b></a>\
+             </div><div class=\"node\"><div class=\"box on\" id=\"m-AUX\">"
+            ),
+            "{modules}"
+        );
+        // A source clock has no inputs.
+        assert!(
+            modules.contains(
+                "<div class=\"row\"><div class=\"node\"><div class=\"box on source\" id=\"m-OSC\">"
+            ),
+            "{modules}"
+        );
+        // Every link has its target, once.
+        for name in ["OSC", "IRC", "MUX", "OUT", "AUX"] {
+            assert_eq!(
+                html.matches(&format!("id=\"m-{name}\"")).count(),
+                1,
+                "{name}"
+            );
+        }
+        assert_eq!(html.matches("<div").count(), html.matches("</div>").count());
+    }
+
+    #[test]
+    fn a_selector_value_without_a_source_is_an_input_too() {
+        let html = page(&grouped(), &[("AD:0x10", 7), ("AD:0x14", 0)], &[]);
+        assert!(html.contains(
+            "<a class=\"in\" href=\"#m-OSC\"><span class=\"code\">1</span><span>OSC</span><b>?</b></a>\
+             <span class=\"in sel unknown\"><span class=\"code\">7</span>\
+             <span>not described</span><b>?</b></span></div>"
+        ), "{html}");
     }
 
     #[test]

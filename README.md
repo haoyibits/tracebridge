@@ -494,12 +494,18 @@ XOSC            8 MHz    given  ; crystal: the board decides
 - It only reads memory-mapped registers (`Data.Long`), each once, so it works
   while the core runs. A register that cannot be read marks its clocks as
   `error` (exit code 1); the rest is still printed.
-- **`--html`** also writes the tree as a diagram to
-  `<project>/.tracebridge/clock.html` and prints its `file://` address. The
-  diagram grows from the source clocks on the left to the clocks they feed;
-  a selector lists all its sources with the chosen one highlighted, and a
-  clock's branch can be folded. It is one file that loads nothing from the
-  network and follows the browser's light or dark setting.
+- **`--html`** also writes a diagram to `<project>/.tracebridge/clock.html`
+  and prints its `file://` address. It is one file that loads nothing from
+  the network and follows the browser's light or dark setting. It has two
+  views of the same clocks:
+  - **By module**, when the description gives its clocks a `group`: one
+    panel per group, arranged like the clock figures of a reference manual.
+    Every selector is a row with all the sources it can pick on the left
+    (each with its frequency, the chosen one marked) and the clocks it feeds
+    on the right. A source from another row is named, and the name links to
+    where that clock is made.
+  - **By source**: one tree from the source clocks on the left to the clocks
+    they feed, each clock under the clock it runs from right now.
 
 tracebridge contains no chip: the tree comes from a **description file**,
 chosen like the flash scripts. `--tree <file>` names one; otherwise the file
@@ -524,6 +530,7 @@ mul = "PLLDV[6:0]"                       # frequency = source * mul / div
 div = "PLLDV[14:12]"
 enable = "CTL[2]"                        # 0: the clock is off
 warn = [{ when = "PLLSR[2] == 0", text = "not locked" }]
+group = "PLL"                            # optional: its panel in the diagram
 ```
 
 Expressions take numbers, register fields (`REG[high:low]`, `REG[bit]`,

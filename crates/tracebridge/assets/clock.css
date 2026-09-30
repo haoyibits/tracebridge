@@ -12,6 +12,11 @@
   --warn: #a96a00;
   --bad: #cc3d3d;
   --shadow: 0 1px 2px rgb(16 24 40 / 0.08);
+  --group: rgb(16 24 40 / 0.035);
+  /* Connectors run 19px below the top of a box, through its first line. */
+  --tap: 19px;
+  --reach: 26px;
+  --gap: 10px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -27,6 +32,7 @@
     --warn: #e5c07b;
     --bad: #e06c75;
     --shadow: none;
+    --group: rgb(255 255 255 / 0.035);
   }
 }
 * {
@@ -102,15 +108,159 @@ code,
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+.views {
+  display: inline-flex;
+  margin: 10px 0 0;
+  border: 1.5px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.views button {
+  padding: 4px 12px;
+  border: 0;
+  background: var(--panel);
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+}
+.views button[aria-pressed="true"] {
+  background: var(--mux);
+  color: var(--panel);
+  font-weight: 600;
+}
+body[data-view="modules"] .tree,
+body[data-view="tree"] .modules {
+  display: none;
+}
+
+/* By module: a panel per group; in it one row per selector, with the
+   sources it can pick on the left and what it feeds on the right. */
+.modules {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 14px 24px 40px;
+}
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 12px 18px 18px;
+  border: 1.5px dashed var(--line);
+  border-radius: 12px;
+  background: var(--group);
+}
+.panel h2 {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+.row {
+  display: flex;
+  align-items: flex-start;
+}
+/* The first input sits on the connector line of the box it feeds. */
+.inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 250px;
+  padding-top: calc(var(--tap) - 10px);
+}
+.in {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  height: 20px;
+  padding-right: calc(var(--reach) + 7px);
+  color: var(--dim);
+  font: 11.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.in b {
+  min-width: 58px;
+  font: 11.5px system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+.in .code {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--chip);
+  font-size: 10.5px;
+}
+a.in:hover span:not(.code) {
+  text-decoration: underline;
+}
+.in.sel {
+  color: var(--ink);
+  font-weight: 600;
+}
+.in.sel b {
+  font-weight: 700;
+}
+.in.sel .code {
+  background: var(--mux);
+  color: var(--panel);
+}
+.in.unknown,
+.in.unknown b {
+  color: var(--warn);
+}
+/* From an input to the vertical line in front of the box. */
+.in::before {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 9px;
+  width: var(--reach);
+  border-top: 2px solid var(--line);
+}
+.in.sel::before {
+  border-color: var(--mux);
+}
+.in::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: -2px;
+  bottom: -2px;
+  border-right: 2px solid var(--line);
+}
+.in:first-child::after {
+  top: 9px;
+}
+.in:last-child::after {
+  bottom: auto;
+  height: 13px;
+}
+.in:first-child:last-child::after {
+  display: none;
+}
+/* From the inputs to the box. */
+.inputs + .node {
+  padding-left: var(--reach);
+}
+.inputs + .node::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: var(--tap);
+  width: var(--reach);
+  border-top: 2px solid var(--mux);
+}
+.box:target {
+  outline: 2.5px solid var(--mux);
+  outline-offset: 2px;
+}
+
 /* The tree grows to the right: a node is its box and, next to it, the
    column of the clocks that run from it. A clock and the first clock it
    feeds share one line, so the main path reads straight across and the
-   source clocks stay in view. Connectors run 19px below the top of a box,
-   through its first line of text. */
+   source clocks stay in view. */
 .tree {
-  --tap: 19px;
-  --reach: 26px;
-  --gap: 10px;
   display: inline-flex;
   flex-direction: column;
   gap: 22px;
