@@ -317,7 +317,7 @@ id 回绕：… fe → 00 → 01
       - 跨行的信号不画连线，只写名字（手册的图 952 也是这样），名字是指向 `#m-<时钟名>` 的链接。
       - 没有任何 group 的描述文件只有树，没有切换按钮。
     - SR6P6 的描述按图 951、952 分了 6 个 group（振荡器、CGM_PER 的 PLL0 和系统时钟、CGM0/1/2、CGM_PER 的辅助时钟），并加了 `AUX2`、`AUX5` 两个固定来源的节点，让 FRAY 和 PSI5 的分频器像手册那样各成一块。
-    - **发版时要做的一步**：带 `group` 的 SR6P6 描述存在 `~/.config/tracebridge/clock/sr6p6.toml.next`。0.1.11 及更早的版本遇到 `group` 会报 "unknown key"，所以在含这个功能的版本发布之前，`sr6p6.toml` 保持不带 `group` 的内容，其他方面两份相同。发版并且用户升级之后，把 `.next` 改名覆盖 `sr6p6.toml`。
+    - 带 `group` 的描述文件需要 0.1.12 或更新的版本：更早的版本遇到 `group` 会报 "unknown key"。2026-09-30 发布 0.1.12 后，本机已升级，`~/.config/tracebridge/clock/sr6p6.toml` 已换成带 `group` 的版本，并用安装的 0.1.12 对着真板生成过图。
     - 2026-09-30 用开发版对着用户正在运行的 PowerView（SR6P6 板子连着）生成过一次按模块的图（只读），数据和布局都正常。
 - 读取一律在 PowerView 端求值（`Data.Long`、`Register`、`PER.VALUE`、`sYmbol.*`）；只有 `verify` 用原始内存 API，而且只读 `AD:`。
 - `PER.Set.CONDitions`：第一次用 PER 函数前、S 命令之后、调试器状态（`SYStem.Mode()`、`STATE.RUN()`）变化后、核在运行时，每次都重新快照。失败只警告。
