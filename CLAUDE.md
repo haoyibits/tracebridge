@@ -317,6 +317,8 @@ id 回绕：… fe → 00 → 01
       - 跨行的信号不画连线，只写名字（手册的图 952 也是这样），名字是指向 `#m-<时钟名>` 的链接。
       - 没有任何 group 的描述文件只有树，没有切换按钮。
     - SR6P6 的描述按图 951、952 分了 6 个 group（振荡器、CGM_PER 的 PLL0 和系统时钟、CGM0/1/2、CGM_PER 的辅助时钟），并加了 `AUX2`、`AUX5` 两个固定来源的节点，让 FRAY 和 PSI5 的分频器像手册那样各成一块。
+    - **发版时要做的一步**：带 `group` 的 SR6P6 描述存在 `~/.config/tracebridge/clock/sr6p6.toml.next`。0.1.11 及更早的版本遇到 `group` 会报 "unknown key"，所以在含这个功能的版本发布之前，`sr6p6.toml` 保持不带 `group` 的内容，其他方面两份相同。发版并且用户升级之后，把 `.next` 改名覆盖 `sr6p6.toml`。
+    - 2026-09-30 用开发版对着用户正在运行的 PowerView（SR6P6 板子连着）生成过一次按模块的图（只读），数据和布局都正常。
 - 读取一律在 PowerView 端求值（`Data.Long`、`Register`、`PER.VALUE`、`sYmbol.*`）；只有 `verify` 用原始内存 API，而且只读 `AD:`。
 - `PER.Set.CONDitions`：第一次用 PER 函数前、S 命令之后、调试器状态（`SYStem.Mode()`、`STATE.RUN()`）变化后、核在运行时，每次都重新快照。失败只警告。
 - `verify` 默认自己比较（PT_LOAD、`p_paddr`、`AD:`），因为只有这样才能数出差异字节数；手册说 `Data.LOAD.Elf` 默认按 `p_paddr` 加载（`/LOGLOAD` 才改用 `p_vaddr`），`--t32` 额外跑 `/DIFF /PHYSLOAD /NoRegister /NosYmbol /NoClear` 做对照。
