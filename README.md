@@ -344,7 +344,7 @@ t32 [up, halted]> go
 | `verify [elf] [--t32]` | R | Does target memory hold the ELF's loadable content? |
 | `check <file> [--variant V] [--dry-run]` | R | Data-driven acceptance check (below) |
 | `check <file> --halt` | **S** | The same, but stops the core first when checks read CP15 or core registers |
-| `clock [CLOCK=FREQUENCY…] [--tree FILE]` | R | The clock tree with frequencies, computed from the clock registers (below) |
+| `clock [CLOCK=FREQUENCY…] [--tree FILE] [--html]` | R | The clock tree with frequencies, computed from the clock registers (below); `--html` also writes it as a diagram |
 | `watch <file\|name…>` | UI | A PER.Watch window with exactly these registers (PowerView build 176763, 09/2025, or newer) |
 | `attach` | S | `SYStem.Mode Attach`: no reset; the core keeps running or stays halted. PowerView then reports mode "up" |
 | `down` | S | `SYStem.Down` |
@@ -468,12 +468,12 @@ how that comes about.
 ```text
 $ tracebridge debug clock XOSC=8MHz
 /home/me/.config/tracebridge/clock/example.toml (Example MCU (made up))
-IRC          16 MHz   nominal  ; internal RC oscillator
-XOSC         8 MHz    given  ; crystal: the board decides
-  PLL        200 MHz  CLKSEL[24]=1 x50 /2
-    SYSCLK   200 MHz  CLKSEL[1:0]=2  ; core clock
-      BUS    50 MHz   /4  ; peripheral bus
-      TIMER  off      (TIMDIV[31] = 0)
+IRC             16 MHz   nominal  ; internal RC oscillator
+XOSC            8 MHz    given  ; crystal: the board decides
+└─ PLL          200 MHz  CLKSEL[24]=1 x50 /2
+   └─ SYSCLK    200 MHz  CLKSEL[1:0]=2  ; core clock
+      ├─ BUS    50 MHz   /4  ; peripheral bus
+      └─ TIMER  off      (TIMDIV[31] = 0)
 ```
 
 - `off` is a clock that is disabled or whose divider field is 0; `?` is a
@@ -488,9 +488,18 @@ XOSC         8 MHz    given  ; crystal: the board decides
   XOSC = "40MHz"
   ```
 
+- The last column says how the frequency comes about: `nominal` or `given`
+  for a source clock, `FIELD=N` for the value of a selector, and `xN` `/N`
+  for the multiplier and divider applied to the clock one level up.
 - It only reads memory-mapped registers (`Data.Long`), each once, so it works
   while the core runs. A register that cannot be read marks its clocks as
   `error` (exit code 1); the rest is still printed.
+- **`--html`** also writes the tree as a diagram to
+  `<project>/.tracebridge/clock.html` and prints its `file://` address. The
+  diagram grows from the source clocks on the left to the clocks they feed;
+  a selector lists all its sources with the chosen one highlighted, and a
+  clock's branch can be folded. It is one file that loads nothing from the
+  network and follows the browser's light or dark setting.
 
 tracebridge contains no chip: the tree comes from a **description file**,
 chosen like the flash scripts. `--tree <file>` names one; otherwise the file

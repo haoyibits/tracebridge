@@ -684,16 +684,40 @@ pub enum State {
     Error(String),
 }
 
+/// What a selector shows: the field, its value and the sources it can pick.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Selection {
+    pub field: String,
+    pub value: u64,
+    pub options: Vec<(u64, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Evaluated {
     pub name: String,
     pub note: Option<String>,
+    /// A source clock: it runs from no other clock of the tree.
+    pub root: bool,
     /// The clock it runs from, when that is known.
     pub parent: Option<String>,
+    pub selection: Option<Selection>,
     pub state: State,
-    /// How the frequency comes about: `CLKSEL[24]=1 x20 /2`.
-    pub how: String,
+    /// What happens to the source frequency: `x20`, `/2`; `given` or
+    /// `nominal` for a source clock.
+    pub steps: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+impl Evaluated {
+    /// How the frequency comes about: `CLKSEL[24]=1 x20 /2`.
+    pub fn how(&self) -> String {
+        let selection = self
+            .selection
+            .as_ref()
+            .map(|selection| format!("{}={}", selection.field, selection.value));
+        let parts: Vec<String> = selection.into_iter().chain(self.steps.clone()).collect();
+        parts.join(" ")
+    }
 }
 
 pub struct Report {
@@ -752,9 +776,11 @@ impl Evaluator<'_> {
         let mut result = Evaluated {
             name: clock.name.clone(),
             note: clock.note.clone(),
+            root: matches!(clock.source, Source::Root { .. }),
             parent: None,
+            selection: None,
             state: State::Unknown(String::new()),
-            how: String::new(),
+            steps: Vec::new(),
             warnings: Vec::new(),
         };
         if self.visiting.contains(&index) {
@@ -762,7 +788,7 @@ impl Evaluator<'_> {
             return result;
         }
         self.visiting.push(index);
-        result.state = self.state(clock, &mut result.parent, &mut result.how);
+        result.state = self.state(clock, &mut result);
         self.visiting.pop();
         if matches!(result.state, State::Hz(_)) {
             for warning in &clock.warn {
@@ -779,8 +805,13 @@ impl Evaluator<'_> {
         result
     }
 
-    fn state(&mut self, clock: &Clock, parent: &mut Option<String>, how: &mut String) -> State {
-        let mut steps = Vec::new();
+    fn state(&mut self, clock: &Clock, result: &mut Evaluated) -> State {
+        let Evaluated {
+            parent,
+            selection,
+            steps,
+            ..
+        } = result;
         // The source first, so that a clock that is off still has its place
         // in the tree.
         let mut source = match &clock.source {
@@ -809,8 +840,17 @@ impl Evaluator<'_> {
             Source::Select { field, sources } => match field.eval(self.registers) {
                 Err(error) => State::Error(error),
                 Ok(value) => {
-                    steps.push(format!("{}={}", field.text, number(value)));
-                    match sources.get(&(value as u64)).filter(|_| value >= 0.0) {
+                    // A field value: a non-negative integer.
+                    let value = value.max(0.0) as u64;
+                    *selection = Some(Selection {
+                        field: field.text.clone(),
+                        value,
+                        options: sources
+                            .iter()
+                            .map(|(key, name)| (*key, name.clone()))
+                            .collect(),
+                    });
+                    match sources.get(&value) {
                         Some(name) => {
                             *parent = Some(name.clone());
                             State::Hz(0.0)
@@ -829,9 +869,7 @@ impl Evaluator<'_> {
                 State::Error(_) => State::Unknown(format!("{name} failed")),
             };
         }
-        let state = self.derive(clock, source, &mut steps);
-        *how = steps.join(" ");
-        state
+        self.derive(clock, source, steps)
     }
 
     /// Apply `enable`, `mul` and `div` to the source.
@@ -934,22 +972,37 @@ impl Report {
         )
     }
 
-    /// The clocks in tree order with their depth: every clock under the
-    /// clock it runs from.
-    fn rows(&self) -> Vec<(usize, &Evaluated)> {
+    /// The clocks that run from `parent` (the source clocks for `None`), in
+    /// the order of the description.
+    pub fn children<'a>(&'a self, parent: Option<&'a str>) -> impl Iterator<Item = &'a Evaluated> {
+        self.clocks
+            .iter()
+            .filter(move |clock| clock.parent.as_deref() == parent)
+    }
+
+    /// The clocks in tree order, every clock under the clock it runs from,
+    /// each with the branch lines that lead to it (`│  └─ `).
+    fn rows(&self) -> Vec<(String, &Evaluated)> {
         fn visit<'a>(
-            clocks: &'a [Evaluated],
-            parent: Option<&str>,
-            depth: usize,
-            rows: &mut Vec<(usize, &'a Evaluated)>,
+            report: &'a Report,
+            parent: &'a Evaluated,
+            lines: &str,
+            rows: &mut Vec<(String, &'a Evaluated)>,
         ) {
-            for clock in clocks.iter().filter(|c| c.parent.as_deref() == parent) {
-                rows.push((depth, clock));
-                visit(clocks, Some(&clock.name), depth + 1, rows);
+            let children: Vec<&Evaluated> = report.children(Some(&parent.name)).collect();
+            for (index, child) in children.iter().enumerate() {
+                let last = index + 1 == children.len();
+                let branch = if last { "└─ " } else { "├─ " };
+                rows.push((format!("{lines}{branch}"), child));
+                let below = if last { "   " } else { "│  " };
+                visit(report, child, &format!("{lines}{below}"), rows);
             }
         }
         let mut rows = Vec::new();
-        visit(&self.clocks, None, 0, &mut rows);
+        for root in self.children(None) {
+            rows.push((String::new(), root));
+            visit(self, root, "", &mut rows);
+        }
         rows
     }
 
@@ -957,7 +1010,7 @@ impl Report {
         let rows = self.rows();
         let name_width = rows
             .iter()
-            .map(|(depth, clock)| depth * 2 + clock.name.len())
+            .map(|(lines, clock)| lines.chars().count() + clock.name.len())
             .max()
             .unwrap_or(0);
         let values: Vec<String> = rows
@@ -971,9 +1024,9 @@ impl Report {
             .collect();
         let value_width = values.iter().map(String::len).max().unwrap_or(0);
         let mut lines = Vec::new();
-        for ((depth, clock), value) in rows.iter().zip(&values) {
-            let indent = depth * 2;
-            let name = format!("{:<width$}", clock.name, width = name_width - indent);
+        for ((branches, clock), value) in rows.iter().zip(&values) {
+            let width = name_width - branches.chars().count();
+            let name = format!("{:<width$}", clock.name);
             let padded = format!("{value:<value_width$}");
             let (value, reason) = match &clock.state {
                 State::Hz(_) => (style.value(padded), None),
@@ -983,7 +1036,7 @@ impl Report {
                 }
                 State::Error(reason) => (style.bad(padded), Some(reason.clone())),
             };
-            let mut line = format!("{:indent$}{}  {value}", "", style.label(name));
+            let mut line = format!("{}{}  {value}", style.dim(branches), style.label(name));
             let warnings = clock
                 .warnings
                 .iter()
@@ -992,7 +1045,7 @@ impl Report {
                 .note
                 .as_ref()
                 .map(|note| style.dim(format!("; {note}")));
-            let how = Some(clock.how.clone()).filter(|how| !how.is_empty());
+            let how = Some(clock.how()).filter(|how| !how.is_empty());
             for part in how.into_iter().chain(reason).chain(warnings).chain(note) {
                 line.push_str("  ");
                 line.push_str(&part);
@@ -1029,7 +1082,7 @@ impl Report {
                     "hz": hz,
                     "frequency": hz.map(format_frequency),
                     "reason": reason,
-                    "how": clock.how,
+                    "how": clock.how(),
                     "warnings": clock.warnings,
                     "note": clock.note,
                 })
@@ -1197,12 +1250,12 @@ mod tests {
         assert_eq!(
             report.human(Style::PLAIN),
             "\
-IRC          16 MHz   nominal  ; internal RC oscillator
-XOSC         8 MHz    given  ; crystal: the board decides
-  PLL        200 MHz  CLKSEL[24]=1 x50 /2
-    SYSCLK   200 MHz  CLKSEL[1:0]=2  ; core clock
-      BUS    50 MHz   /4  ; peripheral bus
-      TIMER  off      (TIMDIV[31] = 0)"
+IRC             16 MHz   nominal  ; internal RC oscillator
+XOSC            8 MHz    given  ; crystal: the board decides
+└─ PLL          200 MHz  CLKSEL[24]=1 x50 /2
+   └─ SYSCLK    200 MHz  CLKSEL[1:0]=2  ; core clock
+      ├─ BUS    50 MHz   /4  ; peripheral bus
+      └─ TIMER  off      (TIMDIV[31] = 0)"
         );
         assert_eq!(report.exit_code(), 0);
         // Every register once, nothing else.
@@ -1230,11 +1283,11 @@ XOSC         8 MHz    given  ; crystal: the board decides
         let report = report(&mut probe, &[]);
         let text = report.human(Style::PLAIN);
         assert!(
-            text.contains("XOSC         ?       (frequency not given)"),
+            text.contains("XOSC            ?       (frequency not given)"),
             "{text}"
         );
         assert!(
-            text.contains("  PLL        ?       CLKSEL[24]=1 x50 /2  (XOSC is unknown)"),
+            text.contains("└─ PLL          ?       CLKSEL[24]=1 x50 /2  (XOSC is unknown)"),
             "{text}"
         );
         assert!(
@@ -1258,12 +1311,12 @@ XOSC         8 MHz    given  ; crystal: the board decides
         assert_eq!(
             report.human(Style::PLAIN),
             "\
-IRC        16 MHz   nominal  ; internal RC oscillator
-  PLL      400 MHz  CLKSEL[24]=0 x50 /2  ! not locked
-XOSC       8 MHz    given  ; crystal: the board decides
-  SYSCLK   8 MHz    CLKSEL[1:0]=1  ; core clock
-    BUS    2 MHz    /4  ; peripheral bus
-    TIMER  off      (TIMDIV[31] = 0)"
+IRC          16 MHz   nominal  ; internal RC oscillator
+└─ PLL       400 MHz  CLKSEL[24]=0 x50 /2  ! not locked
+XOSC         8 MHz    given  ; crystal: the board decides
+└─ SYSCLK    8 MHz    CLKSEL[1:0]=1  ; core clock
+   ├─ BUS    2 MHz    /4  ; peripheral bus
+   └─ TIMER  off      (TIMDIV[31] = 0)"
         );
     }
 
@@ -1281,19 +1334,22 @@ XOSC       8 MHz    given  ; crystal: the board decides
         let report = report(&mut probe, &[("XOSC", 8e6)]);
         let text = report.human(Style::PLAIN);
         assert!(
-            text.contains("  PLL    off     CLKSEL[24]=1  (CTL[2] = 0)"),
+            text.contains("└─ PLL    off     CLKSEL[24]=1  (CTL[2] = 0)"),
             "{text}"
         );
         assert!(
-            text.contains("SYSCLK   off     CLKSEL[1:0]=3  (CLKSEL[1:0] != 3 is false)"),
+            text.contains("SYSCLK    off     CLKSEL[1:0]=3  (CLKSEL[1:0] != 3 is false)"),
             "{text}"
         );
         assert!(
-            text.contains("  BUS    error   BUSDIV[31]: cannot read BUSDIV (AD:0x40001010): "),
+            text.contains("├─ BUS    error   BUSDIV[31]: cannot read BUSDIV (AD:0x40001010): "),
             "{text}"
         );
         // A divider under a clock that is off only says so.
-        assert!(text.contains("  TIMER  off     (TIMDIV[31] = 0)"), "{text}");
+        assert!(
+            text.contains("└─ TIMER  off     (TIMDIV[31] = 0)"),
+            "{text}"
+        );
         assert_eq!(report.exit_code(), 1);
         // A clock without a known source is listed at the top level.
         assert!(text.lines().any(|line| line.starts_with("SYSCLK")));
@@ -1316,9 +1372,9 @@ XOSC       8 MHz    given  ; crystal: the board decides
         assert_eq!(
             report.human(Style::PLAIN),
             "\
-OSC    8 MHz  nominal
-MUX    ?      SEL[3:0]=11  (this source is not described)
-  OUT  ?      /4  (MUX is unknown)"
+OSC     8 MHz  nominal
+MUX     ?      SEL[3:0]=11  (this source is not described)
+└─ OUT  ?      /4  (MUX is unknown)"
         );
         // Not a missing input: there is nothing to pass.
         assert!(report.missing.is_empty());
@@ -1331,7 +1387,7 @@ MUX    ?      SEL[3:0]=11  (this source is not described)
         assert!(
             report
                 .human(Style::PLAIN)
-                .ends_with("    OUT  off    (DIV[3:0] = 0)"),
+                .ends_with("   └─ OUT  off    (DIV[3:0] = 0)"),
             "{}",
             report.human(Style::PLAIN)
         );
@@ -1389,10 +1445,15 @@ MUX    ?      SEL[3:0]=11  (this source is not described)
         let coloured = report.human(Style::COLOR);
         assert_eq!(strip(&coloured), report.human(Style::PLAIN));
         assert!(
-            coloured.contains("\x1b[36mIRC        \x1b[0m  \x1b[1m16 MHz\x1b[0m"),
+            coloured.contains("\x1b[36mIRC           \x1b[0m  \x1b[1m16 MHz\x1b[0m"),
             "{coloured}"
         );
         assert!(coloured.contains("\x1b[2moff   \x1b[0m"), "{coloured}");
+        // The branch lines recede; the name keeps its colour.
+        assert!(
+            coloured.contains("\x1b[2m      └─ \x1b[0m\x1b[36mTIMER\x1b[0m"),
+            "{coloured}"
+        );
         assert!(coloured.contains("\x1b[33m?     \x1b[0m"), "{coloured}");
     }
 

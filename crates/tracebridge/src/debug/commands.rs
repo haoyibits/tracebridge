@@ -8,6 +8,7 @@ use t32rcl::Value;
 
 use super::check;
 use super::clock;
+use super::clockhtml;
 use super::decode::{self, FaultAddress};
 use super::elf;
 use super::probe::{
@@ -729,7 +730,12 @@ pub fn check(ctx: &mut Context, file: &Path, options: &check::Options) -> DResul
 
 /// R: the clock tree with frequencies, from the clock registers and the
 /// chip's clock tree description.
-pub fn clock(ctx: &mut Context, arguments: &[String], tree: Option<&Path>) -> DResult<Outcome> {
+pub fn clock(
+    ctx: &mut Context,
+    arguments: &[String],
+    tree: Option<&Path>,
+    html: bool,
+) -> DResult<Outcome> {
     // The board's frequencies: trace32.toml first, arguments override.
     let mut inputs = ctx.config.clock.clone();
     inputs.extend(clock::parse_inputs(arguments)?);
@@ -754,8 +760,48 @@ pub fn clock(ctx: &mut Context, arguments: &[String], tree: Option<&Path>) -> DR
     let mut json = report.to_json();
     json["tree"] = json!(path.display().to_string());
     json["description"] = json!(description.description);
+    let mut text = format!("{}\n{}", ctx.style.dim(heading), report.human(ctx.style));
+    if html {
+        // A file in the run directory: the target is not touched.
+        let file = ctx.config.run_dir.join("clock.html");
+        let tree = path.display().to_string();
+        let title = match &description.description {
+            Some(title) => title.clone(),
+            None => path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        };
+        // The frequencies that were used: for each source the last one given.
+        let mut given: Vec<(String, f64)> = Vec::new();
+        for (name, hz) in &inputs {
+            given.retain(|(other, _)| !other.eq_ignore_ascii_case(name));
+            given.push((name.clone(), *hz));
+        }
+        let page = clockhtml::render(
+            &report,
+            &clockhtml::Heading {
+                title: &title,
+                tree: &tree,
+                inputs: &given,
+                generated: &chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+            },
+        );
+        ctx.config
+            .ensure_run_dir()
+            .map_err(|error| DebugError::new(error.0))?;
+        std::fs::write(&file, page).map_err(|error| {
+            DebugError::new(format!("cannot write {}: {error}", file.display()))
+        })?;
+        text.push_str(&format!(
+            "\n{} {}",
+            ctx.style.label("diagram"),
+            clockhtml::file_url(&file)
+        ));
+        json["html"] = json!(file.display().to_string());
+    }
     Ok(Outcome {
-        text: format!("{}\n{}", ctx.style.dim(heading), report.human(ctx.style)),
+        text,
         json,
         code: report.exit_code(),
     })

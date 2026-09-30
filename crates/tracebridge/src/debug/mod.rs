@@ -8,6 +8,7 @@
 
 mod check;
 mod clock;
+mod clockhtml;
 mod commands;
 mod decode;
 mod elf;
@@ -112,6 +113,9 @@ pub enum DebugCommand {
         /// Clock tree description (default: chosen by chip from ~/.config/tracebridge/clock)
         #[arg(long, value_name = "FILE")]
         tree: Option<PathBuf>,
+        /// Also write the tree as a diagram to <project>/.tracebridge/clock.html
+        #[arg(long)]
+        html: bool,
     },
     /// [UI] Open a PER.Watch window with these registers (names, or a file with one per line)
     Watch {
@@ -247,7 +251,9 @@ pub fn execute(ctx: &mut Context, command: &DebugCommand) -> DResult<Outcome> {
                 dry_run: *dry_run,
             },
         ),
-        DebugCommand::Clock { inputs, tree } => commands::clock(ctx, inputs, tree.as_deref()),
+        DebugCommand::Clock { inputs, tree, html } => {
+            commands::clock(ctx, inputs, tree.as_deref(), *html)
+        }
         DebugCommand::Watch { items } => commands::watch(ctx, items),
         DebugCommand::Attach => commands::attach(ctx),
         DebugCommand::Down => commands::command(ctx, "SYStem.Down", "SYStem.Down done"),

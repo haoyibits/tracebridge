@@ -324,12 +324,14 @@ fn clock_tree_from_the_library_and_the_crystal_frequency() {
         )),
         "{text}"
     );
-    assert!(text.contains("XOSC         8 MHz    given"), "{text}");
+    assert!(text.contains("XOSC            8 MHz    given"), "{text}");
     assert!(
-        text.contains("  PLL        200 MHz  CLKSEL[24]=1 x50 /2"),
+        text.contains("└─ PLL          200 MHz  CLKSEL[24]=1 x50 /2"),
         "{text}"
     );
-    assert!(text.contains("      BUS    50 MHz   /4"), "{text}");
+    assert!(text.contains("      ├─ BUS    50 MHz   /4"), "{text}");
+    assert!(!text.contains("diagram"), "{text}");
+    assert!(!project.root().join(".tracebridge/clock.html").exists());
     // Read-only: six register reads and no command.
     let state = rcl.state();
     assert!(state.commands().is_empty());
@@ -354,6 +356,32 @@ fn clock_tree_from_the_library_and_the_crystal_frequency() {
     assert_eq!(pll["frequency"], "400 MHz");
     assert_eq!(pll["source"], "XOSC");
     assert_eq!(document["result"]["tree"], example);
+
+    // --html also writes the diagram into the run directory.
+    let output = project.run(&["debug", "clock", "--html"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let file = project.root().join(".tracebridge/clock.html");
+    let text = stdout(&output);
+    assert!(
+        text.trim_end()
+            .ends_with(&format!("diagram file://{}", file.display())),
+        "{text}"
+    );
+    let page = std::fs::read_to_string(&file).unwrap();
+    assert!(page.starts_with("<!doctype html>"), "{page}");
+    assert!(page.contains("<title>Clock tree: Example MCU (made up)</title>"));
+    assert!(page.contains("given <b>XOSC = 8 MHz</b>"), "{page}");
+    assert!(
+        page.contains("<span class=\"name\">PLL</span><span class=\"freq\">200 MHz</span>"),
+        "{page}"
+    );
+    assert!(project.root().join(".tracebridge/.gitignore").is_file());
+    let output = project.run(&["debug", "clock", "--html", "--json"]);
+    let document: serde_json::Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(
+        document["result"]["html"],
+        file.display().to_string().as_str()
+    );
 
     let output = project.run(&["debug", "clock", "XOSC"]);
     assert_eq!(output.status.code(), Some(1));

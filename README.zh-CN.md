@@ -223,7 +223,7 @@ t32 [up, halted]> go
 | `verify [elf] [--t32]` | R | 检查目标内存里是不是 ELF 的可加载内容 |
 | `check <文件> [--variant V] [--dry-run]` | R | 按数据文件执行验收检查（见下文） |
 | `check <文件> --halt` | **S** | 同上，但检查项要读 CP15 或核心寄存器、而核正在运行时，会先停核 |
-| `clock [时钟=频率…] [--tree 文件]` | R | 读时钟寄存器，算出整棵时钟树和每个时钟的频率（见下文） |
+| `clock [时钟=频率…] [--tree 文件] [--html]` | R | 读时钟寄存器，算出整棵时钟树和每个时钟的频率（见下文）；`--html` 另外生成一张图 |
 | `watch <文件\|名字…>` | UI | 打开只包含这些寄存器的 PER.Watch 窗口（需要 PowerView build 176763，即 09/2025 或更新） |
 | `attach` | S | `SYStem.Mode Attach`：不复位，核保持原来的运行或停止状态。之后 PowerView 显示的模式是 up |
 | `down` | S | `SYStem.Down` |
@@ -281,12 +281,12 @@ variants = ["debug"]                     # 可选：只在 --variant debug 时�
 ```text
 $ tracebridge debug clock XOSC=8MHz
 /home/me/.config/tracebridge/clock/example.toml (Example MCU (made up))
-IRC          16 MHz   nominal  ; internal RC oscillator
-XOSC         8 MHz    given  ; crystal: the board decides
-  PLL        200 MHz  CLKSEL[24]=1 x50 /2
-    SYSCLK   200 MHz  CLKSEL[1:0]=2  ; core clock
-      BUS    50 MHz   /4  ; peripheral bus
-      TIMER  off      (TIMDIV[31] = 0)
+IRC             16 MHz   nominal  ; internal RC oscillator
+XOSC            8 MHz    given  ; crystal: the board decides
+└─ PLL          200 MHz  CLKSEL[24]=1 x50 /2
+   └─ SYSCLK    200 MHz  CLKSEL[1:0]=2  ; core clock
+      ├─ BUS    50 MHz   /4  ; peripheral bus
+      └─ TIMER  off      (TIMDIV[31] = 0)
 ```
 
 - `off`：时钟被关闭，或者分频字段是 0。`?`：算不出频率，原因是没给输入频率，或者选择器选了描述文件里没列出的源。`! …`：描述文件里定义的警告，比如 PLL 没锁定。
@@ -297,7 +297,9 @@ XOSC         8 MHz    given  ; crystal: the board decides
   XOSC = "40MHz"
   ```
 
+- 最后一列是频率的由来：源时钟是 `nominal`（描述文件里的标称值）或 `given`（你给的）；`字段=N` 是选择器读到的值；`xN`、`/N` 是相对上一级时钟的乘数和除数。
 - 它只读内存映射的寄存器（`Data.Long`），每个读一次，所以核在运行时也能用。某个寄存器读不出来时，用到它的时钟标为 `error`（退出码 1），其余照常显示。
+- **`--html`** 另外把时钟树画成一张图，写到 `<项目>/.tracebridge/clock.html`，并打印它的 `file://` 地址。图从左边的源时钟画到右边它们供给的时钟；选择器会列出全部可选的源，并高亮当前选中的那个；每个时钟的分支可以折叠。它是单个文件，不从网络加载任何东西，明暗跟随浏览器的设置。
 
 tracebridge 本身不包含任何芯片的数据，时钟树来自**描述文件**，选法和烧录脚本一样：`--tree <文件>` 直接指定；否则在 `~/.config/tracebridge/clock/*.toml`（或 `$XDG_CONFIG_HOME/tracebridge/clock`）里找 `chips` 能匹配 `flash.chip` 的文件，`flash.chip` 为空时用 `target.cpu`。全部写法见 [`docs/clock-example.toml`](docs/clock-example.toml)：
 
