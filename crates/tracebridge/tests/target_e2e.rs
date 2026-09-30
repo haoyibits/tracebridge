@@ -164,4 +164,27 @@ fn flash_script_is_chosen_by_chip_from_the_library() {
     let output = project.run(&["flash", "--chip", "OTHER"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("no flash script found for chip OTHER"));
+
+    // 'chips' marks the script that 'flash' would use.
+    let script = library.join("board.cmm");
+    let plain = stdout(&project.run(&["chips", "MYCHIP-A"]));
+    assert!(
+        plain.contains(&format!(
+            "  * library  MYCHIP*                      {}\n",
+            script.display()
+        )),
+        "{plain}"
+    );
+    let output = common::command_in(&project.root(), &["chips", "MYCHIP-A"])
+        .env("CLICOLOR_FORCE", "1")
+        .output()
+        .unwrap();
+    let forced = stdout(&output);
+    assert!(
+        forced.contains(&format!(
+            "  \x1b[32m*\x1b[0m library  \x1b[36mMYCHIP*                     \x1b[0m \x1b[1m{}\x1b[0m\n",
+            script.display()
+        )),
+        "{forced}"
+    );
 }

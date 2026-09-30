@@ -18,8 +18,8 @@ use toml::{Table, Value};
 use super::probe::{
     self, DResult, DebugError, PerRegister, PerSnapshot, Probe, TargetAddress, hex32,
 };
-use super::style::Style;
 use crate::pycompat::parse_int_auto;
+use crate::style::Style;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckFile {
@@ -1039,7 +1039,7 @@ mod tests {
             coloured.ends_with("\x1b[1;31m2 passed, 1 failed, 0 errors\x1b[0m"),
             "{coloured}"
         );
-        assert_eq!(crate::debug::style::strip(&coloured), text);
+        assert_eq!(crate::style::strip(&coloured), text);
     }
 
     #[test]

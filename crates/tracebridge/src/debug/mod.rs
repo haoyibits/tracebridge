@@ -13,7 +13,6 @@ mod elf;
 mod perfile;
 mod probe;
 mod repl;
-mod style;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,9 +25,9 @@ use crate::config::Config;
 use crate::errors::Result;
 use crate::powerview;
 use crate::remote::{CONNECT_TIMEOUT, connect_debugger};
+use crate::style::{self, Style};
 use commands::Context;
 use probe::{DResult, DebugError, PerSnapshot, Probe};
-use style::Style;
 
 /// Exit code when a check fails or `verify` finds a mismatch (1 means the
 /// command itself could not run, 2 is a usage error).

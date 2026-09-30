@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 use super::jsonc;
 use crate::config::Config;
 use crate::errors::Result;
+use crate::style::Style;
 use crate::{bail, bridge_error};
 
 const TASKS_TEMPLATE: &str = include_str!("../../assets/tasks.json");
@@ -233,10 +234,12 @@ fn install_file(
     };
     let template = replace_tokens(&jsonc::loads(template, "template")?, replacements);
     let merged = merge_document(kind, &existing, &template)?;
+    let style = Style::stdout();
     let backup_path = if target.exists() {
         let backup_path = backup(target)?;
         println!(
-            "backed up {} -> {}",
+            "{} {} -> {}",
+            style.dim("backed up"),
             target.display(),
             backup_path.display()
         );
@@ -245,7 +248,7 @@ fn install_file(
         None
     };
     atomic_write(target, &to_pretty_json(&merged))?;
-    println!("installed/merged {}", target.display());
+    println!("{} {}", style.good("installed/merged"), target.display());
     Ok(backup_path)
 }
 

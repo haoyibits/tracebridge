@@ -89,6 +89,8 @@ tracebridge vscode          # 或者：tracebridge rustrover
 
 运行时文件（PowerView 日志、工具栏脚本）写在 `<项目>/.tracebridge/`，这个目录里自带 `.gitignore`。
 
+**颜色**：在终端里输出带颜色；有没有颜色，文字和列对齐都一样。输出到管道或加了 `--json` 时是纯文本。`NO_COLOR=1` 关闭颜色；`CLICOLOR_FORCE=1` 在管道里也强制带颜色（例如 `tracebridge debug fault | less -R`）。两个例外：`[tracebridge]` 前缀始终是青色；`tracebridge adapter` 的日志始终是纯文本，因为 IDE 要匹配它的内容。
+
 ### 烧录脚本怎么选
 
 烧录脚本必须支持 `PREPAREONLY` 约定：脚本只初始化目标板、声明 Flash，然后返回。之后由 tracebridge 执行 `FLASH.ReProgram ALL /Erase`、`Data.LOAD.Elf`、`FLASH.ReProgram OFF`、`SYStem.Down`、`SYStem.Up`。
@@ -189,7 +191,7 @@ tracebridge debug go
 
 两种用法的命令和输出完全一样，会话只是省去了每次重新连接和输入前缀。`--json` 让每条命令输出一个 JSON 文档。退出码：0 正常；1 出错（包括寄存器找不到）；2 用法错误；3 表示 `check` 有检查项没通过，或者 `verify` 发现内存和 ELF 不一致。
 
-在终端里输出带颜色：标签和寄存器名是青色，地址蓝色，读到的值加粗，符号黄色，BITFLD 文字和 `ok`/`match` 绿色，`error:`/`FAIL`/`MISMATCH` 和异常原因红色；提示符里 `running` 是绿色，`halted` 是黄色。有没有颜色，文字和列对齐都一样。输出到管道或加了 `--json` 时不带颜色。`NO_COLOR=1` 关闭颜色；`CLICOLOR_FORCE=1` 在管道里也强制带颜色（例如 `tracebridge debug fault | less -R`）。
+在终端里输出带颜色：标签和寄存器名是青色，地址蓝色，读到的值加粗，符号黄色，BITFLD 文字和 `ok`/`match` 绿色，`error:`/`FAIL`/`MISMATCH` 和异常原因红色；提示符里 `running` 是绿色，`halted` 是黄色。怎么关闭或强制颜色见[配置](#配置)。
 
 ### 典型流程
 

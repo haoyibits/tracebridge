@@ -283,17 +283,19 @@ id 回绕：… fe → 00 → 01
 | 8.1 debug 硬件反馈修复 | ✅ 0.1.6 已在硬件上确认 C15 地址、歧义报错、PAR_256 报错、fault 无异常 | 7f15cb2 |
 | 8.2 debug 第二轮修复 | ✅ 0.1.7 在硬件上全部确认 | 8cac1b8 |
 | 8.3 BITFLD 文字、部分路径提示 | ✅ 离线测试，并用真实 persr6p6.per 抽查；用户要求修完直接发布（0.1.8），待硬件复测 | 见 git log |
-| 8.4 debug 输出加颜色 | ✅ 单测、e2e，并在 pty 里对着假 RCL 服务端跑过会话；未发布 | 见 git log |
+| 8.4 输出加颜色（先 debug，后其他命令） | ✅ 单测、e2e，并在 pty 里对着假 RCL 服务端跑过会话；未发布 | 见 git log |
 
 **debug 的决定**（2026-09-29，任务说明是本地文件 `tracebridge-debug-prompt.md`，里面有项目数据，不提交；用户让我自己定这些点）：
-- 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`、`style.rs`（颜色）。
-- **颜色**（2026-09-30，第 8.4 阶段，用户要求"增加一些颜色方便阅读"）：
+- 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`。
+- **颜色**（2026-09-30，第 8.4 阶段，用户要求"增加一些颜色方便阅读"，随后要求其他命令也加；用户的终端主题是 One Dark，配色以它为准）。实现在 `crates/tracebridge/src/style.rs`：
   - 按"这段文字是什么"上色，各命令一致：标签和寄存器名青色，地址蓝色，读到的值加粗，符号黄色，BITFLD 文字和 ok/match 绿色，`error:`/FAIL/MISMATCH 和异常原因（向量名、EC、DFSC/IFSC）红色加粗，注释变暗；状态 running 绿、halted 黄、down 品红、disconnected 红。
   - `Style` 放在 `Context.style` 里，在生成文字时上色。**先补齐空格再上色**，去掉转义序列后的文字必须和无颜色时逐字节相同（测试用 `style::strip` 断言），所以原有的输出断言都不用改。
   - 开关：stdout（错误信息看 stderr）是终端且 `TERM` 不是 `dumb` 时开；`NO_COLOR` 非空则关；`CLICOLOR_FORCE` 非空且不是 `0` 则在管道里也开；两个都设时 `NO_COLOR` 优先。`--json` 不输出文字，所以不受影响。
   - 提示符用 rustyline 的 `Highlighter::highlight_prompt` 上色，传给 `readline` 的仍是纯文本，行编辑器按纯文本算宽度。
   - `help` 用 clap 自带的样式（`StyledStr::ansi()`）。
-  - stderr 上的 `tracebridge:` 前缀：错误红色，警告和 PER.ReProgram 提示黄色。只改了 debug 模块里的输出；`main.rs` 顶层的错误输出和 `info` 前缀没有动。
+  - stderr 上的 `tracebridge:` 前缀：错误红色（包括 `main.rs` 顶层的错误），警告和 PER.ReProgram 提示黄色。
+  - 其他命令：`config` 的 ok 绿、MISSING 红、WARN 黄，键名和 ports/run/exe/note 青色；`chips` 里 `flash` 会用的那一行 `*` 绿、路径加粗，`@Chip` 列青色，`(no PREPAREONLY)` 黄色；`init` 的下一步里命令青色、注释变暗；`flash`/`load` 最后一行成功信息绿色；`vscode`/`rustrover` 的 installed 绿，backed up/unchanged 变暗；`rtt` 只给 stderr 上的状态行上色（`TRACE32 RTT:` 青色、`[rtt]` 黄色），目标输出的字节原样透传。
+  - **两处不动**：`info` 的 `[tracebridge]` 前缀仍然始终是青色、不判断 TTY（「已定的实现决策」第 7 条）；`adapter` 代理的日志始终是纯文本，因为 VS Code 的 beginsPattern/endsPattern 和 LSP4IJ 的 debugServerReadyPattern 要匹配这些行。
 - 读取一律在 PowerView 端求值（`Data.Long`、`Register`、`PER.VALUE`、`sYmbol.*`）；只有 `verify` 用原始内存 API，而且只读 `AD:`。
 - `PER.Set.CONDitions`：第一次用 PER 函数前、S 命令之后、调试器状态（`SYStem.Mode()`、`STATE.RUN()`）变化后、核在运行时，每次都重新快照。失败只警告。
 - `verify` 默认自己比较（PT_LOAD、`p_paddr`、`AD:`），因为只有这样才能数出差异字节数；手册说 `Data.LOAD.Elf` 默认按 `p_paddr` 加载（`/LOGLOAD` 才改用 `p_vaddr`），`--t32` 额外跑 `/DIFF /PHYSLOAD /NoRegister /NosYmbol /NoClear` 做对照。

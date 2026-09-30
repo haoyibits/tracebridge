@@ -21,6 +21,7 @@ mod remote;
 mod rtt;
 mod rustrover;
 mod signals;
+mod style;
 mod t32config;
 mod target;
 mod ui;
@@ -32,6 +33,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config::{Config, find_config_file, load_config};
 use crate::errors::Result;
+use crate::style::Style;
 use crate::target::Action;
 use crate::ui::info;
 
@@ -115,7 +117,7 @@ fn main() {
     let code = match run(cli) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("tracebridge: {error}");
+            style::error(error);
             1
         }
     };
@@ -128,12 +130,27 @@ fn run(cli: Cli) -> Result<i32> {
     if let Command::Init = cli.command {
         let path = init::init(&cwd)?;
         info(&format!("created {}", path.display()));
+        let style = Style::stdout();
         println!(
-            "\nNext steps:\n  1. Edit program, elf, [target] and [flash] in trace32.toml\n  \
-             2. tracebridge config    # every path should be ok\n  \
-             3. tracebridge flash     # or: tracebridge load\n  \
-             4. tracebridge vscode    # or: tracebridge rustrover, to debug from the IDE"
+            "\n{}\n  1. Edit program, elf, [target] and [flash] in trace32.toml",
+            style.value("Next steps:")
         );
+        let steps = [
+            ("tracebridge config", "# every path should be ok"),
+            ("tracebridge flash ", "# or: tracebridge load"),
+            (
+                "tracebridge vscode",
+                "# or: tracebridge rustrover, to debug from the IDE",
+            ),
+        ];
+        for (number, (command, comment)) in steps.iter().enumerate() {
+            println!(
+                "  {}. {}    {}",
+                number + 2,
+                style.label(command),
+                style.dim(comment)
+            );
+        }
         return Ok(0);
     }
 
@@ -242,10 +259,10 @@ fn open(config: &Config, action: Option<Action>, env: &pycompat::Env) -> Result<
         config,
         choice.as_ref().map(flash::Choice::script).as_deref(),
     )?;
-    info(match action {
+    info(&Style::stdout().good(match action {
         Action::Flash => "flashed, symbols loaded, target running",
         Action::Load => "symbols loaded, target running",
-    });
+    }));
     Ok(())
 }
 
@@ -269,6 +286,7 @@ fn chips(config: &Config, query: Option<&str>, env: &pycompat::Env) -> Result<()
     let Some(query) = query.or_else(|| flash::chip_name(config)) else {
         bail!("give a chip name, e.g. 'tracebridge chips STM32H743ZI'");
     };
+    let style = Style::stdout();
     let scripts = flash::catalog(config, env);
     let library = flash::library_dir(env);
     let chosen = flash::choose(query, &scripts);
@@ -278,31 +296,39 @@ fn chips(config: &Config, query: Option<&str>, env: &pycompat::Env) -> Result<()
             script.path.display(),
             script.source.name()
         )),
-        Err(error) => info(&format!("{query}: {error}")),
+        Err(error) => info(&format!("{query}: {}", style.warn(error))),
     }
     let related = flash::search(query, &scripts);
     if !related.is_empty() {
         println!("  related scripts:");
     }
     for script in related.iter().take(40) {
-        let mark = match &chosen {
-            Ok((_, chosen)) if chosen.path == script.path => "*",
-            _ => " ",
+        // The script that 'flash' would use stands out.
+        let (mark, path) = match &chosen {
+            Ok((_, chosen)) if chosen.path == script.path => {
+                (style.good("*"), style.value(script.path.display()))
+            }
+            _ => (" ".to_string(), script.path.display().to_string()),
         };
         let prepare = if script.prepare_only {
-            ""
+            String::new()
         } else {
-            "  (no PREPAREONLY)"
+            style.warn("  (no PREPAREONLY)")
         };
         println!(
-            "  {mark} {:<8} {:<28} {}{prepare}",
+            "  {mark} {:<8} {} {path}{prepare}",
             script.source.name(),
-            script.chips.join(" "),
-            script.path.display()
+            style.label(format!("{:<28}", script.chips.join(" "))),
         );
     }
     if related.len() > 40 {
-        println!("  ... {} more; narrow the query", related.len() - 40);
+        println!(
+            "{}",
+            style.dim(format!(
+                "  ... {} more; narrow the query",
+                related.len() - 40
+            ))
+        );
     }
     println!(
         "
@@ -320,12 +346,18 @@ fn chips(config: &Config, query: Option<&str>, env: &pycompat::Env) -> Result<()
     Ok(())
 }
 
-fn status(path: &Path) -> &'static str {
-    if path.exists() { "ok     " } else { "MISSING" }
+/// The first column of `config`.
+fn status(style: Style, present: bool) -> String {
+    if present {
+        style.good("ok     ")
+    } else {
+        style.bad("MISSING")
+    }
 }
 
 /// `_print_config`, plus the flash script, ports and the Remote API check.
 fn print_config(config: &Config, env: &pycompat::Env) {
+    let style = Style::stdout();
     info(&format!("configuration: {}", config.config_file.display()));
     let entries: [(&str, &Path); 5] = [
         ("project", &config.project_dir),
@@ -335,41 +367,48 @@ fn print_config(config: &Config, env: &pycompat::Env) {
         ("T32_DEBUG_ADAPTER", &config.debug_adapter),
     ];
     for (name, path) in entries {
-        println!("  {} {name}={}", status(path), path.display());
+        println!(
+            "  {} {}={}",
+            status(style, path.exists()),
+            style.label(name),
+            path.display()
+        );
     }
+    let script = style.label("flash script");
     match flash::resolve(config, env) {
         Ok(choice @ flash::Choice::Explicit(_)) => {
-            let state = if config.flash_script_exists() {
-                "ok     "
-            } else {
-                "MISSING"
-            };
-            println!("  {state} flash script={}", describe(&choice));
+            let state = status(style, config.flash_script_exists());
+            println!("  {state} {script}={}", describe(&choice));
         }
-        Ok(choice) => println!("  ok      flash script={}", describe(&choice)),
-        Err(error) => println!("  MISSING flash script: {error}"),
+        Ok(choice) => println!("  {} {script}={}", status(style, true), describe(&choice)),
+        Err(error) => println!("  {} {script}: {error}", status(style, false)),
     }
     println!(
-        "  ports   RCL {}, DAP {} (t32debugadapter {})",
-        config.rcl_port, config.dap_port, config.dap_backend_port
+        "  {} RCL {}, DAP {} (t32debugadapter {})",
+        style.label("ports  "),
+        config.rcl_port,
+        config.dap_port,
+        config.dap_backend_port
     );
-    println!("  run     {}", config.run_dir.display());
+    println!("  {} {}", style.label("run    "), config.run_dir.display());
     if let Ok(exe) = ui::current_exe() {
-        println!("  exe     {}", exe.display());
+        println!("  {} {}", style.label("exe    "), exe.display());
     }
     if config.t32_config.is_file() {
+        let note = style.label("note   ");
+        let warn = style.warn("WARN   ");
         match t32config::rcl_settings(&config.t32_config) {
             None => println!(
-                "  note    config.t32 does not enable the Remote API; tracebridge adds \
+                "  {note} config.t32 does not enable the Remote API; tracebridge adds \
                  --t32-api-rcl=TCP:{} when it starts PowerView",
                 config.rcl_port
             ),
             Some(settings) if !settings.protocol.eq_ignore_ascii_case("NETTCP") => println!(
-                "  WARN    config.t32 has RCL={}; tracebridge needs RCL=NETTCP",
+                "  {warn} config.t32 has RCL={}; tracebridge needs RCL=NETTCP",
                 settings.protocol
             ),
             Some(settings) if settings.port != Some(config.rcl_port) => println!(
-                "  WARN    config.t32 PORT={} differs from trace32.rcl_port {}",
+                "  {warn} config.t32 PORT={} differs from trace32.rcl_port {}",
                 settings
                     .port
                     .map(|port| port.to_string())

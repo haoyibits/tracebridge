@@ -14,6 +14,7 @@ use t32rcl::{Address, Debugger};
 
 use crate::config::Config;
 use crate::errors::Result;
+use crate::style::Style;
 use crate::{bail, bridge_error};
 
 pub const ID_STRING: &[u8] = b"SEGGER RTT";
@@ -358,11 +359,19 @@ pub fn run(config: &Config, args: RttArgs) -> Result<()> {
     };
 
     let mut channel = RttChannel::new(control_block);
-    eprintln!("TRACE32 RTT: {symbol} @ 0x{control_block:08X}; Ctrl-C to stop");
+    // The status lines on stderr; what the target prints is never touched.
+    let style = Style::stderr();
+    eprintln!(
+        "{} {} @ {}; Ctrl-C to stop",
+        style.label("TRACE32 RTT:"),
+        style.symbol(&symbol),
+        style.address(format!("0x{control_block:08X}"))
+    );
     if !channel.refresh_state(&mut debugger).unwrap_or(false) {
         eprintln!(
-            "[rtt] waiting for the target to initialize SEGGER RTT; \
-             if debugging is paused before RTT initialization, press Continue"
+            "{} waiting for the target to initialize SEGGER RTT; \
+             if debugging is paused before RTT initialization, press Continue",
+            style.warn("[rtt]")
         );
     }
     if args.replay {
@@ -404,7 +413,8 @@ pub fn run(config: &Config, args: RttArgs) -> Result<()> {
                 channel.initialized = false;
                 if matches!(consecutive_errors, 5 | 50) || consecutive_errors % 300 == 0 {
                     eprintln!(
-                        "\n[rtt] run-time memory access failed x{consecutive_errors}: {error}"
+                        "\n{} run-time memory access failed x{consecutive_errors}: {error}",
+                        style.warn("[rtt]")
                     );
                 }
                 std::thread::sleep(Duration::from_millis(200));
@@ -412,7 +422,7 @@ pub fn run(config: &Config, args: RttArgs) -> Result<()> {
         }
     }
     drop(guard);
-    eprintln!("\nTRACE32 RTT terminal stopped");
+    eprintln!("\n{}", style.label("TRACE32 RTT terminal stopped"));
     Ok(())
 }
 

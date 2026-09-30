@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use crate::bridge_error;
 use crate::config::Config;
 use crate::errors::Result;
+use crate::style::Style;
 
 pub const RUN_CONFIGURATION: &str = "TRACE32 Attach.run.xml";
 
@@ -102,16 +103,22 @@ pub fn install(config: &Config, exe: &Path) -> Result<PathBuf> {
         .map_err(|error| bridge_error!("cannot create {}: {error}", directory.display()))?;
     let path = directory.join(RUN_CONFIGURATION);
     let contents = render(config, exe);
+    let style = Style::stdout();
     if path.exists() {
         if fs::read_to_string(&path).is_ok_and(|current| current == contents) {
-            println!("unchanged {}", path.display());
+            println!("{} {}", style.dim("unchanged"), path.display());
             return Ok(path);
         }
         let backup = crate::vscode::installer::backup(&path)?;
-        println!("backed up {} -> {}", path.display(), backup.display());
+        println!(
+            "{} {} -> {}",
+            style.dim("backed up"),
+            path.display(),
+            backup.display()
+        );
     }
     crate::vscode::installer::atomic_write(&path, &contents)?;
-    println!("installed {}", path.display());
+    println!("{} {}", style.good("installed"), path.display());
     println!(
         "\nDone. In RustRover: install the \"LSP4IJ\" plugin (Settings > Plugins), then pick \
          'TRACE32: Attach' in the run configurations and press Debug. Run flash, load and rtt \

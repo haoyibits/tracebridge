@@ -1,4 +1,4 @@
-//! Colours for the human output of `debug`.
+//! Colours for the human output.
 //!
 //! A colour marks what a piece of text is (a label, an address, a value, a
 //! symbol), so the same kind of thing looks the same in every command. Text
@@ -8,6 +8,10 @@
 //! Colours are on when the stream is a terminal. `NO_COLOR` (any non-empty
 //! value) turns them off; `CLICOLOR_FORCE` (not empty, not `0`) turns them on
 //! for a pipe such as `| less -R`. JSON output is never coloured.
+//!
+//! Two things stay as they are: the `[tracebridge]` prefix of `ui::info` is
+//! always cyan (as in the Python tool), and the log of the `adapter` proxy is
+//! always plain, because the IDEs match its lines.
 
 use std::ffi::OsString;
 use std::fmt;

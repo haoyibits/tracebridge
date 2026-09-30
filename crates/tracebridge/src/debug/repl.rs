@@ -19,12 +19,12 @@ use serde_json::json;
 
 use super::commands::Context;
 use super::probe::{DResult, DebuggerState, PerSnapshot, Probe};
-use super::style::{self, Style};
 use super::{DebugCli, DebugCommand, Outcome, connect, emit, execute, help_text, parse};
 use crate::bridge_error;
 use crate::config::Config;
 use crate::errors::Result;
 use crate::pycompat::shlex_split;
+use crate::style::{self, Style};
 use crate::ui::info;
 
 /// Split a session line like a shell command line, except that `eval` and

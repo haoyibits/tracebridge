@@ -128,6 +128,13 @@ environment, then `trace32.toml`, then defaults:
 Runtime files (the PowerView log, the toolbar script) are written to
 `<project>/.tracebridge/`, which contains its own `.gitignore`.
 
+**Colours.** On a terminal the output is coloured; the text and the columns
+are the same with and without colours. Piped output and `--json` are plain.
+`NO_COLOR=1` turns the colours off, and `CLICOLOR_FORCE=1` turns them on for
+a pipe (`tracebridge debug fault | less -R`). Two exceptions: the
+`[tracebridge]` prefix is always cyan, and the log of `tracebridge adapter`
+is always plain, because the IDEs match its lines.
+
 ### Choosing the flash script
 
 `tracebridge flash` needs a flash script that supports Lauterbach's
@@ -305,10 +312,8 @@ found), 2 usage, 3 a check failed or `verify` found a difference.
 On a terminal the output is coloured: labels and register names cyan,
 addresses blue, values bold, symbols yellow, BITFLD texts and `ok`/`match`
 green, `error:`/`FAIL`/`MISMATCH` and the fault cause red; in the prompt,
-`running` is green and `halted` yellow. The text and the columns are the same
-with and without colours. Piped output and `--json` are never coloured.
-`NO_COLOR=1` turns the colours off; `CLICOLOR_FORCE=1` turns them on for a
-pipe (`tracebridge debug fault | less -R`).
+`running` is green and `halted` yellow. See [Configuration](#configuration)
+for how to turn the colours off or force them.
 
 ### A typical session
 

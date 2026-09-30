@@ -14,9 +14,9 @@ use super::probe::{
     SymbolRef, TargetAddress, eval_u64, fail, format_value, hex32, read_long, running_error,
     symbolize, value_as_u64,
 };
-use super::style::Style;
 use super::{EXIT_FAILED, Outcome};
 use crate::config::Config;
+use crate::style::Style;
 
 /// PowerView build that introduced PER.Watch, PER.AddWatch and PER.ClearWatch.
 pub const PER_WATCH_BUILD: u64 = 176763;
@@ -857,7 +857,7 @@ mod tests {
     ) -> String {
         let plain = run(&mut probe(), &f).unwrap();
         let coloured = run_styled(&mut probe(), Style::COLOR, &f).unwrap();
-        assert_eq!(crate::debug::style::strip(&coloured.text), plain.text);
+        assert_eq!(crate::style::strip(&coloured.text), plain.text);
         assert_eq!(coloured.json, plain.json);
         assert_eq!(coloured.code, plain.code);
         coloured.text

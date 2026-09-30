@@ -4,14 +4,32 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 fn tracebridge(dir: &Path, args: &[&str]) -> Output {
+    tracebridge_with(dir, args, &[])
+}
+
+fn tracebridge_with(dir: &Path, args: &[&str], vars: &[(&str, &str)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tracebridge"))
         .args(args)
         .current_dir(dir)
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", dir)
+        .envs(vars.iter().copied())
         .output()
         .unwrap()
+}
+
+/// Text without its SGR sequences.
+fn strip(text: &str) -> String {
+    let mut plain = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("\x1b[") {
+        plain.push_str(&rest[..start]);
+        let end = rest[start..].find('m').expect("unterminated SGR sequence");
+        rest = &rest[start + end + 1..];
+    }
+    plain.push_str(rest);
+    plain
 }
 
 fn stdout(output: &Output) -> String {
@@ -50,6 +68,56 @@ fn init_then_config_from_a_subdirectory() {
     assert!(text.contains("configuration: "), "{text}");
     assert!(text.contains("MISSING ELF="), "{text}");
     assert!(text.contains("ports   RCL 20000, DAP 58870"), "{text}");
+}
+
+#[test]
+fn colours_only_on_request_when_piped() {
+    const FORCE: &[(&str, &str)] = &[("CLICOLOR_FORCE", "1")];
+    let dir = tempfile::tempdir().unwrap();
+    let output = tracebridge_with(dir.path(), &["init"], FORCE);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("\x1b[1mNext steps:\x1b[0m"), "{text}");
+    assert!(
+        text.contains(
+            "  2. \x1b[36mtracebridge config\x1b[0m    \x1b[2m# every path should be ok\x1b[0m"
+        ),
+        "{text}"
+    );
+
+    // A pipe gets plain text, except for the [tracebridge] prefix.
+    let plain = stdout(&tracebridge(dir.path(), &["config"]));
+    let (first, rest) = plain.split_once('\n').unwrap();
+    assert!(
+        first.starts_with("\x1b[1;36m[tracebridge]\x1b[0m "),
+        "{plain}"
+    );
+    assert!(!rest.contains('\x1b'), "{plain}");
+    let forced = stdout(&tracebridge_with(dir.path(), &["config"], FORCE));
+    assert!(
+        forced.contains("  \x1b[1;31mMISSING\x1b[0m \x1b[36mELF\x1b[0m="),
+        "{forced}"
+    );
+    assert!(
+        forced.contains("  \x1b[36mports  \x1b[0m RCL 20000, DAP 58870"),
+        "{forced}"
+    );
+    // The same text in the same columns.
+    assert_eq!(strip(&forced), strip(&plain));
+    let vars = [("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")];
+    assert_eq!(
+        stdout(&tracebridge_with(dir.path(), &["config"], &vars)),
+        plain
+    );
+
+    let empty = tempfile::tempdir().unwrap();
+    let output = tracebridge_with(empty.path(), &["config"], FORCE);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).starts_with("\x1b[1;31mtracebridge:\x1b[0m no trace32.toml found in"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]

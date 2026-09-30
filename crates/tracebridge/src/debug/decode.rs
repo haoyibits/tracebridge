@@ -2,7 +2,7 @@
 //! CPSR/SPSR, the Hyp vector table slots and the HSR (Arm DDI 0568A.c,
 //! section E2.1 "HSR"; the same layout as Armv7-A/R HSR).
 
-use super::style::Style;
+use crate::style::Style;
 
 /// `SYStem.Mode()` codes (General Function Reference, SYStem.Mode()).
 pub fn system_mode_name(code: u64) -> Option<&'static str> {

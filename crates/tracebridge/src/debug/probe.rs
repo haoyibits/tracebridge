@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use t32rcl::{Address, Debugger, Value};
 
 use super::perfile;
-use super::style;
+use crate::style;
 
 /// The RCL operations of a debug session.
 pub trait Probe {
