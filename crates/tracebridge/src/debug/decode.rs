@@ -2,6 +2,8 @@
 //! CPSR/SPSR, the Hyp vector table slots and the HSR (Arm DDI 0568A.c,
 //! section E2.1 "HSR"; the same layout as Armv7-A/R HSR).
 
+use super::style::Style;
+
 /// `SYStem.Mode()` codes (General Function Reference, SYStem.Mode()).
 pub fn system_mode_name(code: u64) -> Option<&'static str> {
     Some(match code {
@@ -307,38 +309,68 @@ impl Hsr {
     }
 
     /// Indented lines for the human report.
-    pub fn describe(&self) -> Vec<String> {
+    pub fn describe(&self, style: Style) -> Vec<String> {
+        let bit = |set: bool| style.value(u8::from(set));
         let mut lines = vec![
-            format!("EC    0x{:02X}  {}", self.ec, self.ec_name),
-            format!("IL    {}  {}", u8::from(self.il_bit), self.il.describe()),
-            format!("ISS   0x{:07X}", self.iss),
+            format!(
+                "{}    {}  {}",
+                style.label("EC"),
+                style.value(format!("0x{:02X}", self.ec)),
+                style.bad(self.ec_name)
+            ),
+            format!(
+                "{}    {}  {}",
+                style.label("IL"),
+                bit(self.il_bit),
+                self.il.describe()
+            ),
+            format!(
+                "{}   {}",
+                style.label("ISS"),
+                style.value(format!("0x{:07X}", self.iss))
+            ),
         ];
         match &self.syndrome {
             Syndrome::DataAbort(abort) => {
                 lines.push(format!(
-                    "ISV   {}{}",
-                    u8::from(abort.isv),
+                    "{}   {}{}",
+                    style.label("ISV"),
+                    bit(abort.isv),
                     if abort.isv {
-                        ""
+                        String::new()
                     } else {
-                        "  (no instruction syndrome: SAS/SSE/SRT not valid)"
+                        style.dim("  (no instruction syndrome: SAS/SSE/SRT not valid)")
                     }
                 ));
                 lines.push(format!(
-                    "WnR   {}  ({})",
-                    u8::from(abort.wnr),
+                    "{}   {}  ({})",
+                    style.label("WnR"),
+                    bit(abort.wnr),
                     if abort.wnr { "write" } else { "read" }
                 ));
-                lines.push(format!("DFSC  0b{:06b}  {}", abort.dfsc, abort.dfsc_name));
                 lines.push(format!(
-                    "EA {}  CM {}  S1PTW {}",
-                    u8::from(abort.ea),
-                    u8::from(abort.cm),
-                    u8::from(abort.s1ptw)
+                    "{}  {}  {}",
+                    style.label("DFSC"),
+                    style.value(format!("0b{:06b}", abort.dfsc)),
+                    style.bad(abort.dfsc_name)
+                ));
+                lines.push(format!(
+                    "{} {}  {} {}  {} {}",
+                    style.label("EA"),
+                    bit(abort.ea),
+                    style.label("CM"),
+                    bit(abort.cm),
+                    style.label("S1PTW"),
+                    bit(abort.s1ptw)
                 ));
             }
             Syndrome::PrefetchAbort(abort) => {
-                lines.push(format!("IFSC  0b{:06b}  {}", abort.ifsc, abort.ifsc_name));
+                lines.push(format!(
+                    "{}  {}  {}",
+                    style.label("IFSC"),
+                    style.value(format!("0b{:06b}", abort.ifsc)),
+                    style.bad(abort.ifsc_name)
+                ));
             }
             Syndrome::Other => {}
         }

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use t32rcl::{Address, Debugger, Value};
 
 use super::perfile;
+use super::style;
 
 /// The RCL operations of a debug session.
 pub trait Probe {
@@ -392,16 +393,16 @@ impl PerSnapshot {
             return Ok(false);
         }
         self.reprogrammed = true;
-        eprintln!(
-            "tracebridge: no default PER file loaded; running PER.ReProgram (loads the CPU's \
-             default PER file; debugger state only, the target is not touched)"
+        style::notice(
+            "no default PER file loaded; running PER.ReProgram (loads the CPU's \
+             default PER file; debugger state only, the target is not touched)",
         );
         if let Err(error) = probe.cmd("PER.ReProgram") {
             let error = DebugError::from(error);
             if error.lost {
                 return Err(error);
             }
-            eprintln!("tracebridge: warning: PER.ReProgram failed ({error})");
+            style::warning(format!("PER.ReProgram failed ({error})"));
             return Ok(false);
         }
         // The old snapshot, if any, belongs to no PER file.
@@ -420,10 +421,10 @@ impl PerSnapshot {
             Ok(()) => Ok(()),
             Err(error) if error.lost => Err(error),
             Err(error) => {
-                eprintln!(
-                    "tracebridge: warning: PER.Set.CONDitions failed ({error}); registers \
+                style::warning(format!(
+                    "PER.Set.CONDitions failed ({error}); registers \
                      inside IF conditions of the PER file may not resolve"
-                );
+                ));
                 Ok(())
             }
         }

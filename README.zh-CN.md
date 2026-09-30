@@ -189,6 +189,8 @@ tracebridge debug go
 
 两种用法的命令和输出完全一样，会话只是省去了每次重新连接和输入前缀。`--json` 让每条命令输出一个 JSON 文档。退出码：0 正常；1 出错（包括寄存器找不到）；2 用法错误；3 表示 `check` 有检查项没通过，或者 `verify` 发现内存和 ELF 不一致。
 
+在终端里输出带颜色：标签和寄存器名是青色，地址蓝色，读到的值加粗，符号黄色，BITFLD 文字和 `ok`/`match` 绿色，`error:`/`FAIL`/`MISMATCH` 和异常原因红色；提示符里 `running` 是绿色，`halted` 是黄色。有没有颜色，文字和列对齐都一样。输出到管道或加了 `--json` 时不带颜色。`NO_COLOR=1` 关闭颜色；`CLICOLOR_FORCE=1` 在管道里也强制带颜色（例如 `tracebridge debug fault | less -R`）。
+
 ### 典型流程
 
 ```text

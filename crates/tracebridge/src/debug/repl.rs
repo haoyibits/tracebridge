@@ -5,6 +5,7 @@
 //! A failing command never ends the session. A lost RCL connection is
 //! reported and `reconnect` retries it.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use rustyline::completion::Completer;
@@ -18,6 +19,7 @@ use serde_json::json;
 
 use super::commands::Context;
 use super::probe::{DResult, DebuggerState, PerSnapshot, Probe};
+use super::style::{self, Style};
 use super::{DebugCli, DebugCommand, Outcome, connect, emit, execute, help_text, parse};
 use crate::bridge_error;
 use crate::config::Config;
@@ -89,6 +91,7 @@ pub fn complete(names: &[String], line: &str, pos: usize) -> (usize, Vec<String>
 
 struct CommandHelper {
     names: Vec<String>,
+    style: Style,
 }
 
 impl Completer for CommandHelper {
@@ -108,7 +111,21 @@ impl Hinter for CommandHelper {
     type Hint = String;
 }
 
-impl Highlighter for CommandHelper {}
+impl Highlighter for CommandHelper {
+    /// The prompt itself stays plain text, so the editor measures its width
+    /// without the colours.
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        _default: bool,
+    ) -> Cow<'b, str> {
+        if self.style.enabled() {
+            Cow::Owned(self.style.prompt(prompt))
+        } else {
+            Cow::Borrowed(prompt)
+        }
+    }
+}
 
 impl Validator for CommandHelper {}
 
@@ -125,6 +142,7 @@ pub struct Session<'a, P> {
     config: &'a Config,
     cwd: &'a Path,
     json: bool,
+    style: Style,
     connector: Box<dyn FnMut() -> DResult<P> + 'a>,
     probe: Option<P>,
     per: PerSnapshot,
@@ -135,6 +153,7 @@ impl<'a, P: Probe> Session<'a, P> {
         config: &'a Config,
         cwd: &'a Path,
         json: bool,
+        style: Style,
         connector: Box<dyn FnMut() -> DResult<P> + 'a>,
         probe: P,
     ) -> Self {
@@ -142,6 +161,7 @@ impl<'a, P: Probe> Session<'a, P> {
             config,
             cwd,
             json,
+            style,
             connector,
             probe: Some(probe),
             per: PerSnapshot::new(Some(config.t32_sys.clone())),
@@ -155,7 +175,9 @@ impl<'a, P: Probe> Session<'a, P> {
 
     fn lost(&mut self, message: &str) {
         self.probe = None;
-        eprintln!("tracebridge: RCL connection lost ({message}); 'reconnect' retries");
+        style::error(format!(
+            "RCL connection lost ({message}); 'reconnect' retries"
+        ));
     }
 
     /// `t32 [up, halted]> `, `t32 [down]> `, `t32 [disconnected]> `.
@@ -177,7 +199,7 @@ impl<'a, P: Probe> Session<'a, P> {
         let args = match split_line(line) {
             Ok(args) => args,
             Err(error) => {
-                eprintln!("tracebridge: {error}");
+                style::error(error);
                 return Flow::Continue;
             }
         };
@@ -198,9 +220,9 @@ impl<'a, P: Probe> Session<'a, P> {
         match &command {
             DebugCommand::Quit => return Flow::Quit,
             DebugCommand::Help { command } => {
-                match help_text(command.as_deref()) {
+                match help_text(command.as_deref(), self.style) {
                     Ok(text) => print!("{text}"),
-                    Err(message) => eprintln!("tracebridge: {message}"),
+                    Err(message) => style::error(message),
                 }
                 return Flow::Continue;
             }
@@ -223,7 +245,7 @@ impl<'a, P: Probe> Session<'a, P> {
             _ => {}
         }
         let Some(probe) = self.probe.as_mut() else {
-            eprintln!("tracebridge: not connected to PowerView; 'reconnect' retries");
+            style::error("not connected to PowerView; 'reconnect' retries");
             return Flow::Continue;
         };
         let mut ctx = Context {
@@ -231,6 +253,7 @@ impl<'a, P: Probe> Session<'a, P> {
             per: &mut self.per,
             config: self.config,
             cwd: self.cwd,
+            style: self.style,
         };
         let result = execute(&mut ctx, &command);
         let lost = match &result {
@@ -255,11 +278,20 @@ fn history_path(config: &Config) -> Option<PathBuf> {
 /// The interactive session.
 pub fn run(config: &Config, cwd: &Path, json: bool) -> Result<i32> {
     let debugger = connect(config).map_err(|error| bridge_error!("{error}"))?;
-    let mut session = Session::new(config, cwd, json, Box::new(|| connect(config)), debugger);
+    let style = Style::stdout();
+    let mut session = Session::new(
+        config,
+        cwd,
+        json,
+        style,
+        Box::new(|| connect(config)),
+        debugger,
+    );
     let mut editor = Editor::<CommandHelper, DefaultHistory>::new()
         .map_err(|error| bridge_error!("cannot start the line editor: {error}"))?;
     editor.set_helper(Some(CommandHelper {
         names: command_names(),
+        style,
     }));
     let history = history_path(config);
     if let Some(path) = &history {
@@ -353,6 +385,7 @@ mod tests {
             &config,
             dir.path(),
             false,
+            Style::PLAIN,
             Box::new(connect),
             probe(11, Some(false)),
         );
@@ -379,6 +412,7 @@ mod tests {
             &config,
             dir.path(),
             false,
+            Style::PLAIN,
             Box::new(connect),
             probe(11, Some(true)),
         );

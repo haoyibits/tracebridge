@@ -13,6 +13,7 @@ mod elf;
 mod perfile;
 mod probe;
 mod repl;
+mod style;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -27,6 +28,7 @@ use crate::powerview;
 use crate::remote::{CONNECT_TIMEOUT, connect_debugger};
 use commands::Context;
 use probe::{DResult, DebugError, PerSnapshot, Probe};
+use style::Style;
 
 /// Exit code when a check fails or `verify` finds a mismatch (1 means the
 /// command itself could not run, 2 is a usage error).
@@ -196,15 +198,20 @@ pub fn parse(args: Vec<String>) -> std::result::Result<(DebugCli, bool), clap::E
 }
 
 /// Help for the session, or for one command.
-pub fn help_text(command: Option<&str>) -> std::result::Result<String, String> {
+pub fn help_text(command: Option<&str>, style: Style) -> std::result::Result<String, String> {
     let mut cli = DebugCli::command();
-    match command {
-        None => Ok(cli.render_help().to_string()),
+    let help = match command {
+        None => cli.render_help(),
         Some(name) => match cli.find_subcommand_mut(name) {
-            Some(sub) => Ok(sub.render_help().to_string()),
-            None => Err(format!("unknown command '{name}'; 'help' lists them")),
+            Some(sub) => sub.render_help(),
+            None => return Err(format!("unknown command '{name}'; 'help' lists them")),
         },
-    }
+    };
+    Ok(if style.enabled() {
+        help.ansi().to_string()
+    } else {
+        help.to_string()
+    })
 }
 
 /// Run one command (everything except the session commands).
@@ -276,7 +283,7 @@ pub fn emit(command: &str, json: bool, result: DResult<Outcome>) -> i32 {
                     })
                 );
             }
-            eprintln!("tracebridge: {error}");
+            style::error(&error);
             1
         }
     }
@@ -310,16 +317,18 @@ pub fn main_without_config(args: &[String]) -> Option<i32> {
         }
     };
     match cli.command {
-        Some(DebugCommand::Help { command }) => Some(match help_text(command.as_deref()) {
-            Ok(text) => {
-                print!("{text}");
-                0
-            }
-            Err(message) => {
-                eprintln!("tracebridge: {message}");
-                2
-            }
-        }),
+        Some(DebugCommand::Help { command }) => {
+            Some(match help_text(command.as_deref(), Style::stdout()) {
+                Ok(text) => {
+                    print!("{text}");
+                    0
+                }
+                Err(message) => {
+                    style::error(message);
+                    2
+                }
+            })
+        }
         Some(DebugCommand::Quit) => Some(0),
         _ => None,
     }
@@ -347,6 +356,7 @@ pub fn main(config: &Config, cwd: &Path, args: Vec<String>) -> Result<i32> {
             per: &mut per,
             config,
             cwd,
+            style: Style::stdout(),
         };
         execute(&mut ctx, &command)
     });
@@ -434,6 +444,7 @@ mod tests {
             per: &mut per,
             config: &config,
             cwd: dir.path(),
+            style: Style::PLAIN,
         };
         let error = execute(&mut ctx, &DebugCommand::Quit).unwrap_err();
         assert_eq!(error.message, "'quit' is a session command");
@@ -441,11 +452,19 @@ mod tests {
 
     #[test]
     fn help_lists_kinds() {
-        let text = help_text(None).unwrap();
+        let text = help_text(None, Style::PLAIN).unwrap();
         assert!(text.contains("[R] Debugger mode"), "{text}");
         assert!(text.contains("[S] SYStem.Down"));
         assert!(text.contains("[UI] Open a PER.Watch window"));
-        assert!(help_text(Some("reg")).unwrap().contains("NAME|ADDRESS"));
-        assert!(help_text(Some("nope")).is_err());
+        assert!(
+            help_text(Some("reg"), Style::PLAIN)
+                .unwrap()
+                .contains("NAME|ADDRESS")
+        );
+        assert!(help_text(Some("nope"), Style::PLAIN).is_err());
+        // The same text, with clap's styling.
+        let colored = help_text(None, Style::COLOR).unwrap();
+        assert!(colored.contains("\x1b["), "{colored}");
+        assert_eq!(style::strip(&colored), text);
     }
 }

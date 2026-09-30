@@ -76,6 +76,47 @@ fn status_reads_state_without_resetting() {
 }
 
 #[test]
+fn colours_only_on_request_when_piped() {
+    let rcl = FakeRcl::start();
+    halted(&rcl);
+    let project = Project::new(rcl.port, "");
+    let run = |args: &[&str], vars: &[(&str, &str)]| {
+        let output = common::command_in(&project.root(), args)
+            .envs(vars.iter().copied())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", stderr(&output));
+        stdout(&output)
+    };
+    // A pipe gets plain text.
+    let plain = run(&["debug", "status"], &[]);
+    assert!(plain.contains("state  halted"), "{plain}");
+    assert!(!plain.contains('\x1b'), "{plain}");
+    let forced = run(&["debug", "status"], &[("CLICOLOR_FORCE", "1")]);
+    assert!(
+        forced.contains("\x1b[36mstate\x1b[0m  \x1b[33mhalted\x1b[0m"),
+        "{forced}"
+    );
+    let vars = [("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")];
+    assert_eq!(run(&["debug", "status"], &vars), plain);
+    // JSON is never coloured.
+    let json = run(&["debug", "status", "--json"], &[("CLICOLOR_FORCE", "1")]);
+    assert!(!json.contains('\x1b'), "{json}");
+    serde_json::from_str::<serde_json::Value>(json.trim()).unwrap();
+    // An error on stderr.
+    let output = common::command_in(&project.root(), &["debug", "eval", "NOPE()"])
+        .env("CLICOLOR_FORCE", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).starts_with("\x1b[1;31mtracebridge:\x1b[0m "),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn reg_json_output() {
     let rcl = FakeRcl::start();
     halted(&rcl);

@@ -302,6 +302,14 @@ just saves reconnecting and retyping the prefix. `--json` prints one JSON
 document per command. Exit codes: 0 ok, 1 error (including register not
 found), 2 usage, 3 a check failed or `verify` found a difference.
 
+On a terminal the output is coloured: labels and register names cyan,
+addresses blue, values bold, symbols yellow, BITFLD texts and `ok`/`match`
+green, `error:`/`FAIL`/`MISMATCH` and the fault cause red; in the prompt,
+`running` is green and `halted` yellow. The text and the columns are the same
+with and without colours. Piped output and `--json` are never coloured.
+`NO_COLOR=1` turns the colours off; `CLICOLOR_FORCE=1` turns them on for a
+pipe (`tracebridge debug fault | less -R`).
+
 ### A typical session
 
 ```text

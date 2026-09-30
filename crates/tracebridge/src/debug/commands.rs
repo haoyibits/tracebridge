@@ -14,6 +14,7 @@ use super::probe::{
     SymbolRef, TargetAddress, eval_u64, fail, format_value, hex32, read_long, running_error,
     symbolize, value_as_u64,
 };
+use super::style::Style;
 use super::{EXIT_FAILED, Outcome};
 use crate::config::Config;
 
@@ -29,6 +30,8 @@ pub struct Context<'a> {
     pub config: &'a Config,
     /// Relative file arguments are resolved against this directory.
     pub cwd: &'a Path,
+    /// Colours of the human output.
+    pub style: Style,
 }
 
 /// A function result, or `None` when TRACE32 cannot evaluate it; a lost
@@ -55,10 +58,11 @@ fn symbol_json(symbol: &Option<SymbolRef>) -> serde_json::Value {
     }
 }
 
-fn with_symbol(value: u64, symbol: &Option<SymbolRef>) -> String {
+fn with_symbol(style: Style, value: u64, symbol: &Option<SymbolRef>) -> String {
+    let value = style.value(hex32(value));
     match symbol {
-        Some(symbol) => format!("{}  {}", hex32(value), symbol.describe()),
-        None => format!("{}  (no symbol)", hex32(value)),
+        Some(symbol) => format!("{value}  {}", style.symbol(symbol.describe())),
+        None => format!("{value}  {}", style.dim("(no symbol)")),
     }
 }
 
@@ -66,6 +70,7 @@ fn with_symbol(value: u64, symbol: &Option<SymbolRef>) -> String {
 
 /// R: debugger mode, run state, power, CPU; PC and CPSR when halted.
 pub fn status(ctx: &mut Context) -> DResult<Outcome> {
+    let style = ctx.style;
     let probe = &mut *ctx.probe;
     let mode = eval_u64(probe, "SYStem.Mode()")?;
     let running = match optional(probe.fnc("STATE.RUN()"))? {
@@ -83,24 +88,30 @@ pub fn status(ctx: &mut Context) -> DResult<Outcome> {
     let state = DebuggerState { mode, running };
 
     let mut lines = vec![format!(
-        "mode   {} ({mode})",
-        decode::system_mode_label(mode)
+        "{}   {} ({mode})",
+        style.label("mode"),
+        style.state(&decode::system_mode_label(mode))
     )];
     let run_text = match (state.is_up(), running) {
-        (true, Some(true)) => "running",
-        (true, Some(false)) => "halted",
-        _ => "-",
+        (true, Some(true)) => style.state("running"),
+        (true, Some(false)) => style.state("halted"),
+        _ => style.dim("-"),
     };
-    lines.push(format!("state  {run_text}"));
+    lines.push(format!("{}  {run_text}", style.label("state")));
     lines.push(format!(
-        "power  {}",
+        "{}  {}",
+        style.label("power"),
         match power {
-            Some(true) => "on",
-            Some(false) => "off",
-            None => "-",
+            Some(true) => style.good("on"),
+            Some(false) => style.bad("off"),
+            None => style.dim("-"),
         }
     ));
-    lines.push(format!("cpu    {}", cpu.as_deref().unwrap_or("-")));
+    lines.push(format!(
+        "{}    {}",
+        style.label("cpu"),
+        cpu.as_deref().unwrap_or("-")
+    ));
 
     let mut pc_json = serde_json::Value::Null;
     let mut cpsr_json = serde_json::Value::Null;
@@ -110,7 +121,11 @@ pub fn status(ctx: &mut Context) -> DResult<Outcome> {
             .and_then(value_as_u64)
         {
             let symbol = symbolize(probe, pc)?;
-            lines.push(format!("pc     {}", with_symbol(pc, &symbol)));
+            lines.push(format!(
+                "{}     {}",
+                style.label("pc"),
+                with_symbol(style, pc, &symbol)
+            ));
             pc_json = json!({"value": pc, "hex": hex32(pc), "symbol": symbol_json(&symbol)});
         }
         if let Some(cpsr) = optional(probe.fnc("Register(CPSR)"))?
@@ -118,7 +133,12 @@ pub fn status(ctx: &mut Context) -> DResult<Outcome> {
             .and_then(value_as_u64)
         {
             let psr = decode::decode_psr(cpsr as u32);
-            lines.push(format!("cpsr   {}  {}", hex32(cpsr), psr.describe()));
+            lines.push(format!(
+                "{}   {}  {}",
+                style.label("cpsr"),
+                style.value(hex32(cpsr)),
+                psr.describe()
+            ));
             cpsr_json = psr.to_json();
         }
     }
@@ -143,8 +163,9 @@ struct RegEntry {
     name: String,
     path: Option<String>,
     address: Option<String>,
-    /// The address column when it needs an explanation.
-    shown_address: Option<String>,
+    /// The address column when it needs an explanation: the address text and
+    /// the remark that follows it in parentheses.
+    shown_address: Option<(String, &'static str)>,
     raw_address: Option<String>,
     /// Whether `Data.Long(address)` reads the same register.
     address_check: AddressCheck,
@@ -157,6 +178,7 @@ struct RegEntry {
 /// R: registers by PER name (`HSR`, `HSCTLR.C`), full PER path, or raw
 /// address (`C15:0x4025`, `AD:0x40000000`).
 pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
+    let style = ctx.style;
     let probe = &mut *ctx.probe;
     let running = probe::core_running(probe)?;
     if names
@@ -207,21 +229,21 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
             entry.address_check = probe::verify_address(probe, &register, value)?;
             match (entry.address_check, register.source) {
                 (AddressCheck::Failed, AddressSource::PerAddress) => {
-                    entry.shown_address = Some(format!(
-                        "{} (PER.ADDRESS text; no command-line address reads this register)",
-                        register.raw
+                    entry.shown_address = Some((
+                        register.raw.clone(),
+                        "PER.ADDRESS text; no command-line address reads this register",
                     ));
                 }
                 (AddressCheck::Failed, AddressSource::PerFile) => {
-                    entry.shown_address = Some(format!(
-                        "{} (from the PER file; Data.Long there reads another value)",
-                        register.address
+                    entry.shown_address = Some((
+                        register.address.to_string(),
+                        "from the PER file; Data.Long there reads another value",
                     ));
                 }
                 (AddressCheck::Unconfirmed, _) => {
-                    entry.shown_address = Some(format!(
-                        "{} (unconfirmed: the value cannot tell)",
-                        register.address
+                    entry.shown_address = Some((
+                        register.address.to_string(),
+                        "unconfirmed: the value cannot tell",
                     ));
                 }
                 _ => {}
@@ -244,25 +266,38 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
     let lines: Vec<String> = entries
         .iter()
         .map(|entry| {
-            let address = entry
-                .shown_address
-                .clone()
-                .or_else(|| entry.address.clone())
-                .unwrap_or_default();
+            let name = style.label(format!("{:<width$}", entry.name));
+            let (address, remark) = match &entry.shown_address {
+                Some((address, remark)) => (address.clone(), format!(" ({remark})")),
+                None => (entry.address.clone().unwrap_or_default(), String::new()),
+            };
             match (&entry.error, entry.value) {
-                (Some(error), _) => format!("{:<width$}  error: {error}", entry.name),
+                (Some(error), _) => format!("{name}  {} {error}", style.bad("error:")),
                 (None, Some(value)) => {
-                    let mut line =
-                        format!("{:<width$}  {address:<16}  {}", entry.name, hex32(value));
+                    // Pad by the plain text; the colours have no width.
+                    let padding = 16usize.saturating_sub(address.len() + remark.len());
+                    let mut line = format!(
+                        "{name}  {}{}{:padding$}  {}",
+                        style.address(&address),
+                        style.warn(&remark),
+                        "",
+                        style.value(hex32(value))
+                    );
                     if let Some(choice) = &entry.choice {
-                        line.push_str(&format!("  \"{}\"", choice.text));
+                        line.push_str(&format!("  {}", style.text(format!("\"{}\"", choice.text))));
                     }
                     if let Some(note) = &entry.note {
-                        line.push_str(&format!("\n{:<width$}  note: {note}", ""));
+                        line.push_str(&format!(
+                            "\n{:<width$}  {}",
+                            "",
+                            style.dim(format!("note: {note}"))
+                        ));
                     }
                     line
                 }
-                (None, None) => format!("{:<width$}  {address}", entry.name),
+                (None, None) => {
+                    format!("{name}  {}{}", style.address(&address), style.warn(&remark))
+                }
             }
         })
         .collect();
@@ -299,6 +334,7 @@ pub fn reg(ctx: &mut Context, names: &[String]) -> DResult<Outcome> {
 
 /// R: `count` 32-bit words at an address or a symbol, read with Data.Long().
 pub fn mem(ctx: &mut Context, location: &str, count: u32) -> DResult<Outcome> {
+    let style = ctx.style;
     let probe = &mut *ctx.probe;
     if count == 0 || count > MEM_MAX_WORDS {
         fail!("count must be between 1 and {MEM_MAX_WORDS}");
@@ -329,14 +365,26 @@ pub fn mem(ctx: &mut Context, location: &str, count: u32) -> DResult<Outcome> {
     }
     let mut lines = Vec::new();
     if let Some(symbol) = symbol {
-        lines.push(format!("{symbol} = {base}"));
+        lines.push(format!(
+            "{} = {}",
+            style.symbol(symbol),
+            style.address(&base)
+        ));
     }
     for (row, chunk) in words.chunks(4).enumerate() {
         let offset = row as u64 * 16;
-        let values: Vec<String> = chunk.iter().map(|w| format!("{w:08X}")).collect();
+        // Zero words recede, so that the content stands out.
+        let values: Vec<String> = chunk
+            .iter()
+            .map(|w| match w {
+                0 => style.dim(format!("{w:08X}")),
+                _ => format!("{w:08X}"),
+            })
+            .collect();
         lines.push(format!(
-            "{}  +0x{offset:03X}  {}",
-            base.offset(offset),
+            "{}  {}  {}",
+            style.address(base.offset(offset)),
+            style.dim(format!("+0x{offset:03X}")),
             values.join(" ")
         ));
     }
@@ -369,6 +417,7 @@ struct OtherTable {
 
 /// R: Armv7/Armv8-R AArch32 Hyp fault report.
 pub fn fault(ctx: &mut Context) -> DResult<Outcome> {
+    let style = ctx.style;
     let probe = &mut *ctx.probe;
     if let Some(Value::Bool(true)) = optional(probe.fnc("CPUIS64BIT()"))? {
         fail!("fault decodes the AArch32 Hyp mode registers, and this core is 64-bit");
@@ -422,20 +471,26 @@ pub fn fault(ctx: &mut Context) -> DResult<Outcome> {
     let mut lines = Vec::new();
     let table_name = hvbar_symbol
         .as_ref()
-        .map(|s| format!(" ({})", s.describe()))
+        .map(|s| format!(" ({})", style.symbol(s.describe())))
         .unwrap_or_default();
-    lines.push(format!("PC        {}", with_symbol(pc, &pc_symbol)));
+    lines.push(format!(
+        "{}        {}",
+        style.label("PC"),
+        with_symbol(style, pc, &pc_symbol)
+    ));
     match (&slot, &other_table) {
         (Some((offset, name)), _) => lines.push(format!(
-            "          hyp vector \"{name}\": HVBAR {}{table_name} + 0x{offset:02X}",
+            "          hyp vector {}: HVBAR {}{table_name} + 0x{offset:02X}",
+            style.bad(format!("\"{name}\"")),
             hex32(hvbar)
         )),
         (None, Some(other)) => lines.push(format!(
-            "          \"{}\" entry of {} at {}, which is NOT the active table \
+            "          {} entry of {} at {}, which is {} \
              (HVBAR {}{table_name})",
-            other.slot,
-            other.symbol,
+            style.bad(format!("\"{}\"", other.slot)),
+            style.symbol(&other.symbol),
             hex32(other.base),
+            style.warn("NOT the active table"),
             hex32(hvbar)
         )),
         (None, None) => lines.push(format!(
@@ -447,10 +502,23 @@ pub fn fault(ctx: &mut Context) -> DResult<Outcome> {
     // exception has been taken to Hyp mode.
     let recorded = hsr_raw != 0;
     if recorded {
-        lines.push(format!("HSR       {}", hex32(hsr_raw.into())));
-        lines.extend(hsr.describe().into_iter().map(|line| format!("  {line}")));
+        lines.push(format!(
+            "{}       {}",
+            style.label("HSR"),
+            style.value(hex32(hsr_raw.into()))
+        ));
+        lines.extend(
+            hsr.describe(style)
+                .into_iter()
+                .map(|line| format!("  {line}")),
+        );
     } else {
-        lines.push("HSR       0x00000000  HSR = 0: no exception recorded".into());
+        lines.push(format!(
+            "{}       {}  {}",
+            style.label("HSR"),
+            style.value("0x00000000"),
+            style.good("HSR = 0: no exception recorded")
+        ));
     }
     let fault_address = if recorded {
         hsr.fault_address()
@@ -459,19 +527,28 @@ pub fn fault(ctx: &mut Context) -> DResult<Outcome> {
     };
     match fault_address {
         FaultAddress::Hdfar => lines.push(format!(
-            "HDFAR     {}  (faulting data address)",
-            hex32(hdfar)
+            "{}     {}  {}",
+            style.label("HDFAR"),
+            style.value(hex32(hdfar)),
+            style.dim("(faulting data address)")
         )),
         FaultAddress::Hifar => lines.push(format!(
-            "HIFAR     {}  (faulting instruction address)",
-            hex32(hifar)
+            "{}     {}  {}",
+            style.label("HIFAR"),
+            style.value(hex32(hifar)),
+            style.dim("(faulting instruction address)")
         )),
         FaultAddress::None => {}
     }
-    lines.push(format!("ELR_hyp   {}", with_symbol(elr, &elr_symbol)));
     lines.push(format!(
-        "SPSR_hyp  {}  {}",
-        hex32(spsr),
+        "{}   {}",
+        style.label("ELR_hyp"),
+        with_symbol(style, elr, &elr_symbol)
+    ));
+    lines.push(format!(
+        "{}  {}  {}",
+        style.label("SPSR_hyp"),
+        style.value(hex32(spsr)),
         spsr_decoded.describe()
     ));
 
@@ -539,31 +616,36 @@ pub fn verify(ctx: &mut Context, elf_path: Option<&Path>, t32: bool) -> DResult<
     }
     let results = elf::compare(ctx.probe, &segments)?;
 
+    let style = ctx.style;
     let mut lines = vec![path.display().to_string()];
     for result in &results {
         let runs = if result.vaddr != result.paddr {
-            format!("  (runs at 0x{:08X})", result.vaddr)
+            style.dim(format!("  (runs at 0x{:08X})", result.vaddr))
         } else {
             String::new()
         };
         let verdict = match result.first_difference {
-            None => "match".to_string(),
-            Some(first) => format!(
+            None => style.good("match"),
+            Some(first) => style.bad(format!(
                 "{} bytes differ, first at AD:0x{first:08X}",
                 result.differing
-            ),
+            )),
         };
         lines.push(format!(
-            "  AD:0x{:08X}  {:>8} bytes{runs}  {verdict}",
-            result.paddr, result.size
+            "  {}  {:>8} bytes{runs}  {verdict}",
+            style.address(format!("AD:0x{:08X}", result.paddr)),
+            result.size
         ));
     }
     let differing: usize = results.iter().map(|r| r.differing).sum();
     let first = results.iter().find_map(|r| r.first_difference);
     let matched = differing == 0;
     lines.push(match first {
-        None => "match".to_string(),
-        Some(first) => format!("MISMATCH: {differing} bytes differ, first at AD:0x{first:08X}"),
+        None => style.good("match"),
+        Some(first) => format!(
+            "{} {differing} bytes differ, first at AD:0x{first:08X}",
+            style.bad("MISMATCH:")
+        ),
     });
 
     let mut t32_json = serde_json::Value::Null;
@@ -587,11 +669,14 @@ pub fn verify(ctx: &mut Context, elf_path: Option<&Path>, t32: bool) -> DResult<
             None
         };
         lines.push(match &address {
-            None => "TRACE32 /DIFF: match".to_string(),
-            Some(address) => format!("TRACE32 /DIFF: difference at {address}"),
+            None => format!("TRACE32 /DIFF: {}", style.good("match")),
+            Some(address) => format!(
+                "TRACE32 /DIFF: {}",
+                style.bad(format!("difference at {address}"))
+            ),
         });
         if t32_matched != matched {
-            lines.push("note: TRACE32 /DIFF and the LMA comparison disagree".into());
+            lines.push(style.warn("note: TRACE32 /DIFF and the LMA comparison disagree"));
         }
         t32_json = json!({"match": t32_matched, "first_difference": address});
     }
@@ -633,7 +718,7 @@ pub fn check(ctx: &mut Context, file: &Path, options: &check::Options) -> DResul
     let parsed = check::load(&path)?;
     let report = check::run(ctx.probe, ctx.per, &parsed, options)?;
     Ok(Outcome {
-        text: report.human(),
+        text: report.human(ctx.style),
         json: report.to_json(),
         code: report.exit_code(),
     })
@@ -703,7 +788,7 @@ fn after_change(ctx: &mut Context, done: &str, command: &str) -> DResult<Outcome
     ctx.per.invalidate();
     let state = DebuggerState::read(ctx.probe)?;
     Ok(Outcome::ok(
-        format!("{done} (now: {})", state.label()),
+        format!("{done} (now: {})", ctx.style.state(&state.label())),
         json!({"command": command, "state": state.label(), "mode": state.mode, "running": state.running}),
     ))
 }
@@ -713,7 +798,10 @@ pub fn attach(ctx: &mut Context) -> DResult<Outcome> {
     if probe::eval_bool(ctx.probe, "SYStem.Up()")? {
         let state = DebuggerState::read(ctx.probe)?;
         return Ok(Outcome::ok(
-            format!("already attached (now: {})", state.label()),
+            format!(
+                "already attached (now: {})",
+                ctx.style.state(&state.label())
+            ),
             json!({"command": null, "state": state.label(), "mode": state.mode, "running": state.running}),
         ));
     }
@@ -744,6 +832,10 @@ mod tests {
     use crate::target::tests::make_config;
 
     fn run<T>(probe: &mut FakeProbe, f: impl FnOnce(&mut Context) -> T) -> T {
+        run_styled(probe, Style::PLAIN, f)
+    }
+
+    fn run_styled<T>(probe: &mut FakeProbe, style: Style, f: impl FnOnce(&mut Context) -> T) -> T {
         let dir = tempfile::tempdir().unwrap();
         let config = make_config(dir.path());
         let mut per = PerSnapshot::default();
@@ -752,8 +844,90 @@ mod tests {
             per: &mut per,
             config: &config,
             cwd: dir.path(),
+            style,
         };
         f(&mut ctx)
+    }
+
+    /// The text of a command with colours; without its escape sequences it
+    /// must be the plain text, so the columns stay where they are.
+    fn coloured(
+        probe: impl Fn() -> FakeProbe,
+        f: impl Fn(&mut Context) -> DResult<Outcome>,
+    ) -> String {
+        let plain = run(&mut probe(), &f).unwrap();
+        let coloured = run_styled(&mut probe(), Style::COLOR, &f).unwrap();
+        assert_eq!(crate::debug::style::strip(&coloured.text), plain.text);
+        assert_eq!(coloured.json, plain.json);
+        assert_eq!(coloured.code, plain.code);
+        coloured.text
+    }
+
+    #[test]
+    fn colours_mark_labels_values_and_symbols() {
+        let text = coloured(halted_hyp_probe, status);
+        assert!(
+            text.contains("\x1b[36mstate\x1b[0m  \x1b[33mhalted\x1b[0m"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "\x1b[36mpc\x1b[0m     \x1b[1m0x00001030\x1b[0m  \x1b[33mvectors_b+0x10\x1b[0m"
+            ),
+            "{text}"
+        );
+
+        let text = coloured(halted_hyp_probe, fault);
+        assert!(text.contains("\x1b[1;31m\"data abort\"\x1b[0m"), "{text}");
+        assert!(
+            text.contains(
+                "\x1b[36mDFSC\x1b[0m  \x1b[1m0b001100\x1b[0m  \x1b[1;31mpermission fault\x1b[0m"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn coloured_registers_keep_their_columns() {
+        let probe = || {
+            let mut probe = halted_hyp_probe();
+            c15_register(&mut probe);
+            c14_register(&mut probe, 0);
+            probe.set("Data.Long(C15:0x1F12)", Value::Int(0xABCD));
+            probe
+        };
+        let names = ["CTRL", "CTRL.EN", "VCR", "C15:0x1F12", "NOPE"].map(String::from);
+        let text = coloured(probe, |ctx| reg(ctx, &names));
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[0],
+            "\x1b[36mCTRL      \x1b[0m  \x1b[34mC15:0x1001\x1b[0m        \x1b[1m0x00001234\x1b[0m"
+        );
+        assert!(lines[1].ends_with("\x1b[32m\"Enabled\"\x1b[0m"), "{text}");
+        assert!(
+            lines[2].contains(
+                "\x1b[34mC14:0x0070\x1b[0m\x1b[33m (unconfirmed: the value cannot tell)\x1b[0m"
+            ),
+            "{text}"
+        );
+        assert!(lines[4].contains("\x1b[1;31merror:\x1b[0m NOPE"), "{text}");
+    }
+
+    #[test]
+    fn coloured_memory_dims_zero_words() {
+        let probe = || {
+            FakeProbe::with(&[
+                ("sYmbol.BEGIN(record)", Value::Text("SD:0x100".into())),
+                ("Data.Long(SD:0x100)", Value::Int(1)),
+                ("Data.Long(SD:0x104)", Value::Int(0)),
+            ])
+        };
+        let text = coloured(probe, |ctx| mem(ctx, "record", 2));
+        assert_eq!(
+            text,
+            "\x1b[33mrecord\x1b[0m = \x1b[34mSD:0x100\x1b[0m\n\
+             \x1b[34mSD:0x100\x1b[0m  \x1b[2m+0x000\x1b[0m  00000001 \x1b[2m00000000\x1b[0m"
+        );
     }
 
     fn halted_hyp_probe() -> FakeProbe {
@@ -1050,6 +1224,7 @@ mod tests {
             per: &mut per,
             config: &config,
             cwd: dir.path(),
+            style: Style::PLAIN,
         };
         let names = ["FRQ".to_string()];
         let outcome = reg(&mut ctx, &names).unwrap();
@@ -1091,6 +1266,7 @@ mod tests {
             per: &mut per,
             config: &config,
             cwd: dir.path(),
+            style: Style::PLAIN,
         };
         let names = ["CR.WEN".to_string()];
         let outcome = reg(&mut ctx, &names).unwrap();
@@ -1130,6 +1306,7 @@ mod tests {
             per: &mut per,
             config: &config,
             cwd: dir.path(),
+            style: Style::PLAIN,
         };
         let names = ["CTRL".to_string()];
         let outcome = reg(&mut ctx, &names).unwrap();

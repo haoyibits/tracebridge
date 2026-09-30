@@ -18,6 +18,7 @@ use toml::{Table, Value};
 use super::probe::{
     self, DResult, DebugError, PerRegister, PerSnapshot, Probe, TargetAddress, hex32,
 };
+use super::style::Style;
 use crate::pycompat::parse_int_auto;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,25 +409,31 @@ impl Report {
         text
     }
 
-    pub fn human(&self) -> String {
+    pub fn human(&self, style: Style) -> String {
         let mut lines = Vec::new();
         if let Some(description) = &self.description {
-            lines.push(description.clone());
+            lines.push(style.value(description));
         }
         if self.halted {
-            lines.push("core halted (Break) for CP15/core register reads; it stays halted".into());
+            lines.push(
+                style.warn("core halted (Break) for CP15/core register reads; it stays halted"),
+            );
         }
         let width = self.results.iter().map(|r| r.name.len()).max().unwrap_or(0);
         for result in &self.results {
+            let status = format!("{:<5}", result.status.label());
+            let status = match result.status {
+                Status::Pass => style.good(status),
+                Status::Fail | Status::Error => style.bad(status),
+            };
             let value = match result.value {
-                Some(value) => hex32(value),
-                None if self.dry_run => result.read.clone(),
-                None => "-".to_string(),
+                Some(value) => style.value(format!("{:<10}", hex32(value))),
+                None if self.dry_run => format!("{:<10}", result.read),
+                None => style.dim(format!("{:<10}", "-")),
             };
             let mut line = format!(
-                "  {:<5} {:<width$}  {value:<10}  {}",
-                result.status.label(),
-                result.name,
+                "  {status} {}  {value}  {}",
+                style.label(format!("{:<width$}", result.name)),
                 result.expect
             );
             if let Some(error) = &result.error {
@@ -434,7 +441,11 @@ impl Report {
             }
             lines.push(line.trim_end().to_string());
         }
-        lines.push(self.summary());
+        lines.push(if self.passed() {
+            style.good(self.summary())
+        } else {
+            style.bad(self.summary())
+        });
         lines.join("\n")
     }
 
@@ -1019,7 +1030,16 @@ mod tests {
         .unwrap();
         assert_eq!(report.results[2].status, Status::Fail);
         assert_eq!(report.exit_code(), 3);
-        assert!(report.human().contains("FAIL  pc"), "{}", report.human());
+        let text = report.human(Style::PLAIN);
+        assert!(text.contains("FAIL  pc"), "{text}");
+        let coloured = report.human(Style::COLOR);
+        assert!(coloured.contains("\x1b[1;31mFAIL \x1b[0m"), "{coloured}");
+        assert!(coloured.contains("\x1b[32mok   \x1b[0m"), "{coloured}");
+        assert!(
+            coloured.ends_with("\x1b[1;31m2 passed, 1 failed, 0 errors\x1b[0m"),
+            "{coloured}"
+        );
+        assert_eq!(crate::debug::style::strip(&coloured), text);
     }
 
     #[test]
@@ -1078,7 +1098,7 @@ mod tests {
         )
         .unwrap();
         assert!(report.halted);
-        assert!(report.human().contains("core halted (Break)"));
+        assert!(report.human(Style::PLAIN).contains("core halted (Break)"));
         let commands = probe.commands();
         assert_eq!(commands[0], "PER.Set.CONDitions");
         assert_eq!(commands[1], "Break");
