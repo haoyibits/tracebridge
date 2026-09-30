@@ -7,6 +7,7 @@ use serde_json::json;
 use t32rcl::Value;
 
 use super::check;
+use super::clock;
 use super::decode::{self, FaultAddress};
 use super::elf;
 use super::probe::{
@@ -720,6 +721,42 @@ pub fn check(ctx: &mut Context, file: &Path, options: &check::Options) -> DResul
     Ok(Outcome {
         text: report.human(ctx.style),
         json: report.to_json(),
+        code: report.exit_code(),
+    })
+}
+
+// --------------------------------------------------------------- R: clock
+
+/// R: the clock tree with frequencies, from the clock registers and the
+/// chip's clock tree description.
+pub fn clock(ctx: &mut Context, arguments: &[String], tree: Option<&Path>) -> DResult<Outcome> {
+    // The board's frequencies: trace32.toml first, arguments override.
+    let mut inputs = ctx.config.clock.clone();
+    inputs.extend(clock::parse_inputs(arguments)?);
+    let (path, description) = match tree {
+        Some(path) => {
+            let path = resolve_file(ctx.cwd, path);
+            let description = clock::load(&path)?;
+            (path, description)
+        }
+        None => {
+            let Some(chip) = crate::flash::chip_name(ctx.config) else {
+                fail!("no chip name: set target.cpu in trace32.toml or pass --tree <file>");
+            };
+            clock::find(chip, &clock::library_dir(&crate::pycompat::process_env()))?
+        }
+    };
+    let report = clock::evaluate(ctx.probe, &description, &inputs)?;
+    let mut heading = path.display().to_string();
+    if let Some(text) = &description.description {
+        heading.push_str(&format!(" ({text})"));
+    }
+    let mut json = report.to_json();
+    json["tree"] = json!(path.display().to_string());
+    json["description"] = json!(description.description);
+    Ok(Outcome {
+        text: format!("{}\n{}", ctx.style.dim(heading), report.human(ctx.style)),
+        json,
         code: report.exit_code(),
     })
 }

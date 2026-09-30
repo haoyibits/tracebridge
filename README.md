@@ -109,6 +109,7 @@ to the directory that contains it. `tracebridge init` writes this template:
 | `[flash]` | `chip` or `script` (see below), `args` |
 | `[trace32]` | `sys`, `host`, `executable`, `binary`, `config`, `debug_adapter`, `rcl_port`, `dap_port`, `dap_backend_port`, `dap_backend_timeout`, `operation_timeout` |
 | `[rtt]` | `symbol`, `control_block_address`, `poll_interval` |
+| `[clock]` | frequencies only the board knows, for `debug clock`: `XOSC = "40MHz"` |
 
 Environment variables override the file for one run. The precedence is
 environment, then `trace32.toml`, then defaults:
@@ -343,6 +344,7 @@ t32 [up, halted]> go
 | `verify [elf] [--t32]` | R | Does target memory hold the ELF's loadable content? |
 | `check <file> [--variant V] [--dry-run]` | R | Data-driven acceptance check (below) |
 | `check <file> --halt` | **S** | The same, but stops the core first when checks read CP15 or core registers |
+| `clock [CLOCK=FREQUENCY…] [--tree FILE]` | R | The clock tree with frequencies, computed from the clock registers (below) |
 | `watch <file\|name…>` | UI | A PER.Watch window with exactly these registers (PowerView build 176763, 09/2025, or newer) |
 | `attach` | S | `SYStem.Mode Attach`: no reset; the core keeps running or stays halted. PowerView then reports mode "up" |
 | `down` | S | `SYStem.Down` |
@@ -457,6 +459,69 @@ registers and the core is running, `check` stops with an error unless
 `--halt` is given; with `--halt`, it runs `Break`, says so, and leaves the
 core halted (`tracebridge debug go` resumes it).
 
+### `clock`
+
+`tracebridge debug clock` prints the whole clock tree as it is configured
+right now: every clock under the clock it runs from, with its frequency and
+how that comes about.
+
+```text
+$ tracebridge debug clock XOSC=8MHz
+/home/me/.config/tracebridge/clock/example.toml (Example MCU (made up))
+IRC          16 MHz   nominal  ; internal RC oscillator
+XOSC         8 MHz    given  ; crystal: the board decides
+  PLL        200 MHz  CLKSEL[24]=1 x50 /2
+    SYSCLK   200 MHz  CLKSEL[1:0]=2  ; core clock
+      BUS    50 MHz   /4  ; peripheral bus
+      TIMER  off      (TIMDIV[31] = 0)
+```
+
+- `off` is a clock that is disabled or whose divider field is 0; `?` is a
+  clock whose frequency cannot be told (a frequency was not given, or a
+  selector shows a source the description does not list); `! …` is a warning
+  of the description, such as a PLL that is not locked.
+- The only thing you supply is what no register holds, usually the crystal:
+  as an argument (`XOSC=40MHz`), or once in `trace32.toml`:
+
+  ```toml
+  [clock]
+  XOSC = "40MHz"
+  ```
+
+- It only reads memory-mapped registers (`Data.Long`), each once, so it works
+  while the core runs. A register that cannot be read marks its clocks as
+  `error` (exit code 1); the rest is still printed.
+
+tracebridge contains no chip: the tree comes from a **description file**,
+chosen like the flash scripts. `--tree <file>` names one; otherwise the file
+in `~/.config/tracebridge/clock/*.toml` (or `$XDG_CONFIG_HOME/tracebridge/clock`)
+whose `chips` patterns match `flash.chip`, or `target.cpu` when that is empty,
+is used. [`docs/clock-example.toml`](docs/clock-example.toml) shows every form:
+
+```toml
+chips = ["MYCHIP*"]
+
+[reg]                                    # 32-bit registers, read with Data.Long()
+PLLDV = "AD:0x40001008"
+
+[[clock]]
+name = "XOSC"                            # no hz: the board gives the frequency
+
+[[clock]]
+name = "PLL"
+select = "CLKSEL[24]"                    # or: from = "XOSC"
+sources = { "0" = "IRC", "1" = "XOSC" }
+mul = "PLLDV[6:0]"                       # frequency = source * mul / div
+div = "PLLDV[14:12]"
+enable = "CTL[2]"                        # 0: the clock is off
+warn = [{ when = "PLLSR[2] == 0", text = "not locked" }]
+```
+
+Expressions take numbers, register fields (`REG[high:low]`, `REG[bit]`,
+`REG`), `+ - * / ^`, `== !=` and parentheses. Write the description from the
+chip's reference manual; vendor documentation is often confidential, so such
+a file belongs in your library, not in a public repository.
+
 ### Allowing only the read-only commands (Claude Code)
 
 The R commands have no side effects, so an AI assistant can run them without
@@ -472,6 +537,7 @@ asking. In the project's `.claude/settings.json`:
       "Bash(tracebridge debug fault:*)",
       "Bash(tracebridge debug eval:*)",
       "Bash(tracebridge debug verify:*)",
+      "Bash(tracebridge debug clock:*)",
       "Bash(tracebridge debug check checks/boot.toml)",
       "Bash(tracebridge debug check checks/boot.toml --dry-run)",
       "Bash(tracebridge debug check checks/boot.toml --variant release)"

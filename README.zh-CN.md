@@ -223,6 +223,7 @@ t32 [up, halted]> go
 | `verify [elf] [--t32]` | R | 检查目标内存里是不是 ELF 的可加载内容 |
 | `check <文件> [--variant V] [--dry-run]` | R | 按数据文件执行验收检查（见下文） |
 | `check <文件> --halt` | **S** | 同上，但检查项要读 CP15 或核心寄存器、而核正在运行时，会先停核 |
+| `clock [时钟=频率…] [--tree 文件]` | R | 读时钟寄存器，算出整棵时钟树和每个时钟的频率（见下文） |
 | `watch <文件\|名字…>` | UI | 打开只包含这些寄存器的 PER.Watch 窗口（需要 PowerView build 176763，即 09/2025 或更新） |
 | `attach` | S | `SYStem.Mode Attach`：不复位，核保持原来的运行或停止状态。之后 PowerView 显示的模式是 up |
 | `down` | S | `SYStem.Down` |
@@ -273,6 +274,54 @@ variants = ["debug"]                     # 可选：只在 --variant debug 时�
 - `--dry-run` 只解析所有寄存器名和符号，不读任何寄存器或内存的值，所以核在运行时也能用。
 - 有检查项要读 CP15 或核心寄存器、而核正在运行时，`check` 会报错并停止，除非加了 `--halt`。加了 `--halt` 会先执行 `Break` 并说明，检查完核保持停止，用 `tracebridge debug go` 恢复。
 
+### `clock`
+
+`tracebridge debug clock` 打印当前配置下的整棵时钟树：每个时钟排在它的时钟源下面，后面是频率和频率的由来。
+
+```text
+$ tracebridge debug clock XOSC=8MHz
+/home/me/.config/tracebridge/clock/example.toml (Example MCU (made up))
+IRC          16 MHz   nominal  ; internal RC oscillator
+XOSC         8 MHz    given  ; crystal: the board decides
+  PLL        200 MHz  CLKSEL[24]=1 x50 /2
+    SYSCLK   200 MHz  CLKSEL[1:0]=2  ; core clock
+      BUS    50 MHz   /4  ; peripheral bus
+      TIMER  off      (TIMDIV[31] = 0)
+```
+
+- `off`：时钟被关闭，或者分频字段是 0。`?`：算不出频率，原因是没给输入频率，或者选择器选了描述文件里没列出的源。`! …`：描述文件里定义的警告，比如 PLL 没锁定。
+- 你只需要提供寄存器里读不到的频率，通常就是晶振。可以写在命令行（`XOSC=40MHz`），也可以在 `trace32.toml` 里写一次：
+
+  ```toml
+  [clock]
+  XOSC = "40MHz"
+  ```
+
+- 它只读内存映射的寄存器（`Data.Long`），每个读一次，所以核在运行时也能用。某个寄存器读不出来时，用到它的时钟标为 `error`（退出码 1），其余照常显示。
+
+tracebridge 本身不包含任何芯片的数据，时钟树来自**描述文件**，选法和烧录脚本一样：`--tree <文件>` 直接指定；否则在 `~/.config/tracebridge/clock/*.toml`（或 `$XDG_CONFIG_HOME/tracebridge/clock`）里找 `chips` 能匹配 `flash.chip` 的文件，`flash.chip` 为空时用 `target.cpu`。全部写法见 [`docs/clock-example.toml`](docs/clock-example.toml)：
+
+```toml
+chips = ["MYCHIP*"]
+
+[reg]                                    # 32 位寄存器，用 Data.Long() 读
+PLLDV = "AD:0x40001008"
+
+[[clock]]
+name = "XOSC"                            # 不写 hz：频率由板子决定
+
+[[clock]]
+name = "PLL"
+select = "CLKSEL[24]"                    # 或者 from = "XOSC"
+sources = { "0" = "IRC", "1" = "XOSC" }
+mul = "PLLDV[6:0]"                       # 频率 = 源 * mul / div
+div = "PLLDV[14:12]"
+enable = "CTL[2]"                        # 为 0 表示时钟关闭
+warn = [{ when = "PLLSR[2] == 0", text = "not locked" }]
+```
+
+表达式里可以用数字、寄存器字段（`REG[高:低]`、`REG[位]`、`REG`）、`+ - * / ^`、`== !=` 和括号。描述文件要对照芯片的参考手册写；厂商文档常常是保密的，所以这类文件应该放在自己的库目录里，不要放进公开仓库。
+
 ### 只放行只读命令（Claude Code）
 
 R 类命令没有副作用，可以让 AI 助手不经询问直接执行。在项目的 `.claude/settings.json` 里写：
@@ -287,6 +336,7 @@ R 类命令没有副作用，可以让 AI 助手不经询问直接执行。在�
       "Bash(tracebridge debug fault:*)",
       "Bash(tracebridge debug eval:*)",
       "Bash(tracebridge debug verify:*)",
+      "Bash(tracebridge debug clock:*)",
       "Bash(tracebridge debug check checks/boot.toml)",
       "Bash(tracebridge debug check checks/boot.toml --dry-run)",
       "Bash(tracebridge debug check checks/boot.toml --variant release)"

@@ -270,6 +270,100 @@ fn check_file_exit_codes() {
     );
 }
 
+/// The registers of docs/clock-example.toml: PLL = XOSC / 2 x 50.
+fn example_clock_registers(rcl: &FakeRcl) {
+    for (address, value) in [
+        ("0x40001000", "0x7"),
+        ("0x40001004", "0x4"),
+        ("0x40001008", "0x2032"),
+        ("0x4000100C", "0x1000002"),
+        ("0x40001010", "0x80030000"),
+        ("0x40001014", "0x10000"),
+    ] {
+        function(rcl, &format!("Data.Long(AD:{address})"), 0x0004, value);
+    }
+}
+
+#[test]
+fn clock_tree_from_the_library_and_the_crystal_frequency() {
+    let rcl = FakeRcl::start();
+    example_clock_registers(&rcl);
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/clock-example.toml");
+    let project = Project::new(rcl.port, "\n[clock]\nXOSC = \"8MHz\"\n");
+
+    // No description for the chip yet.
+    let output = project.run(&["debug", "clock"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("no clock tree description for chip CORTEXM4")
+            && stderr(&output).contains(".config/tracebridge/clock or pass --tree <file>"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        rcl.state()
+            .log
+            .iter()
+            .all(|line| !line.contains("Data.Long"))
+    );
+
+    // The test HOME is the project directory, so the library lives inside it.
+    let library = project.root().join(".config/tracebridge/clock");
+    std::fs::create_dir_all(&library).unwrap();
+    let description = std::fs::read_to_string(example)
+        .unwrap()
+        .replace("\"EXAMPLE*\"", "\"CORTEXM*\"");
+    std::fs::write(library.join("example.toml"), description).unwrap();
+    let output = project.run(&["debug", "clock"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.starts_with(&format!(
+            "{} (Example MCU (made up))\n",
+            library.join("example.toml").display()
+        )),
+        "{text}"
+    );
+    assert!(text.contains("XOSC         8 MHz    given"), "{text}");
+    assert!(
+        text.contains("  PLL        200 MHz  CLKSEL[24]=1 x50 /2"),
+        "{text}"
+    );
+    assert!(text.contains("      BUS    50 MHz   /4"), "{text}");
+    // Read-only: six register reads and no command.
+    let state = rcl.state();
+    assert!(state.commands().is_empty());
+    assert_eq!(
+        state
+            .log
+            .iter()
+            .filter(|line| line.contains("Data.Long"))
+            .count(),
+        6
+    );
+    drop(state);
+
+    // An argument overrides trace32.toml; --tree names the file.
+    let output = project.run(&["debug", "clock", "XOSC=16MHz", "--tree", example, "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document: serde_json::Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(document["command"], "clock");
+    let clocks = document["result"]["clocks"].as_array().unwrap();
+    let pll = clocks.iter().find(|clock| clock["name"] == "PLL").unwrap();
+    assert_eq!(pll["hz"], 400e6);
+    assert_eq!(pll["frequency"], "400 MHz");
+    assert_eq!(pll["source"], "XOSC");
+    assert_eq!(document["result"]["tree"], example);
+
+    let output = project.run(&["debug", "clock", "XOSC"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("\"XOSC\" must be <clock>=<frequency>, e.g. XOSC=40MHz"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 #[test]
 fn session_runs_commands_from_stdin() {
     let rcl = FakeRcl::start();

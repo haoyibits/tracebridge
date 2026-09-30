@@ -90,14 +90,20 @@ impl Choice {
     }
 }
 
-/// `~/.config/tracebridge/flash`, honouring `XDG_CONFIG_HOME`.
-pub fn library_dir(env: &Env) -> PathBuf {
+/// `~/.config/tracebridge`, honouring `XDG_CONFIG_HOME`: the user's files
+/// that several projects share.
+pub fn config_dir(env: &Env) -> PathBuf {
     let base = env
         .get("XDG_CONFIG_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(crate::pycompat::expanduser("~/.config", env)));
-    base.join("tracebridge").join("flash")
+    base.join("tracebridge")
+}
+
+/// `~/.config/tracebridge/flash`.
+pub fn library_dir(env: &Env) -> PathBuf {
+    config_dir(env).join("flash")
 }
 
 /// Case-insensitive glob match supporting `*` and `?`.
@@ -127,7 +133,7 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 
 /// How specific a matching pattern is: exact names first, then the number of
 /// literal characters.
-fn specificity(pattern: &str) -> (bool, usize) {
+pub fn specificity(pattern: &str) -> (bool, usize) {
     let literal = pattern.chars().filter(|c| !matches!(c, '*' | '?')).count();
     (literal == pattern.chars().count(), literal)
 }

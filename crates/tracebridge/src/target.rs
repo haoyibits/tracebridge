@@ -221,6 +221,7 @@ pub mod tests {
             rtt_symbol: "_SEGGER_RTT".into(),
             rtt_control_block_address: None,
             rtt_poll_interval: 0.02,
+            clock: Vec::new(),
         }
     }
 

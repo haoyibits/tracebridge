@@ -1,0 +1,73 @@
+# Example clock tree description for 'tracebridge debug clock'.
+#
+# The chip, its registers and their addresses are made up. Keep the
+# description of your chip in ~/.config/tracebridge/clock/<name>.toml (it is
+# chosen by `chips`, like the flash scripts), or pass it with --tree:
+#
+#   tracebridge debug clock                  # [clock] XOSC = "8MHz" in trace32.toml
+#   tracebridge debug clock XOSC=8MHz
+#   tracebridge debug clock --tree docs/clock-example.toml XOSC=8MHz
+#
+# A clock's frequency is source * mul / div. Expressions take numbers,
+# register fields (REG[high:low], REG[bit], REG), + - * / ^, == != and
+# parentheses.
+
+description = "Example MCU (made up)"
+# Matched against flash.chip, or target.cpu when that is empty.
+chips = ["EXAMPLE*"]
+
+# The 32-bit registers the expressions use; each is read once, with Data.Long().
+[reg]
+CTL = "AD:0x40001000"    # [2] PLLON, [1] XOSCON, [0] IRCON
+PLLSR = "AD:0x40001004"  # [2] LOCK
+PLLDV = "AD:0x40001008"  # [14:12] PREDIV, [6:0] MFD
+CLKSEL = "AD:0x4000100C" # [24] PLL source, [1:0] system clock source
+BUSDIV = "AD:0x40001010" # [31] enable, [18:16] DIV
+TIMDIV = "AD:0x40001014" # [31] enable, [18:16] DIV
+
+# A source with a frequency the chip fixes. IRC=<frequency> overrides it.
+[[clock]]
+name = "IRC"
+hz = "16MHz"
+enable = "CTL[0]"
+note = "internal RC oscillator"
+
+# A source without `hz`: only the board knows its frequency.
+[[clock]]
+name = "XOSC"
+enable = "CTL[1]"
+note = "crystal: the board decides"
+
+# A selector: the field value picks the source.
+[[clock]]
+name = "PLL"
+select = "CLKSEL[24]"
+sources = { "0" = "IRC", "1" = "XOSC" }
+mul = "PLLDV[6:0]"
+div = "PLLDV[14:12]"
+# 0 means the clock is off.
+enable = "CTL[2]"
+# Shown next to the frequency when the expression is not 0.
+warn = [{ when = "PLLSR[2] == 0", text = "not locked" }]
+
+# An expression may compare: here the field value 3 means "stopped".
+[[clock]]
+name = "SYSCLK"
+select = "CLKSEL[1:0]"
+sources = { "0" = "IRC", "1" = "XOSC", "2" = "PLL" }
+enable = "CLKSEL[1:0] != 3"
+note = "core clock"
+
+# A fixed source and a divider that divides by DIV + 1.
+[[clock]]
+name = "BUS"
+from = "SYSCLK"
+div = "BUSDIV[18:16] + 1"
+enable = "BUSDIV[31]"
+note = "peripheral bus"
+
+[[clock]]
+name = "TIMER"
+from = "SYSCLK"
+div = "TIMDIV[18:16] + 1"
+enable = "TIMDIV[31]"

@@ -65,6 +65,11 @@ dap_backend_port = 58871
 dap_backend_timeout = 30
 operation_timeout = 600
 
+[clock]
+# Frequencies that no register holds, for `tracebridge debug clock`: the name
+# of a source clock of the chip's clock tree description and its frequency.
+# XOSC = "40MHz"
+
 [rtt]
 symbol = "_SEGGER_RTT"
 # Set to bypass the symbol lookup, e.g. "0x20000000".

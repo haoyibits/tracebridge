@@ -49,6 +49,23 @@ pub struct Config {
     pub rtt_symbol: String,
     pub rtt_control_block_address: Option<u64>,
     pub rtt_poll_interval: f64,
+    /// `[clock]`: frequencies the board decides (the crystal), in Hz, for
+    /// `debug clock`.
+    pub clock: Vec<(String, f64)>,
+}
+
+/// A frequency: `40MHz`, `32.768 kHz`, `8e6` or a plain number of Hz.
+pub fn parse_frequency(text: &str) -> std::result::Result<f64, String> {
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let (number, scale) = [("ghz", 1e9), ("mhz", 1e6), ("khz", 1e3), ("hz", 1.0)]
+        .into_iter()
+        .find_map(|(unit, scale)| Some((lower.strip_suffix(unit)?, scale)))
+        .unwrap_or((lower.as_str(), 1.0));
+    match number.trim_end().parse::<f64>() {
+        Ok(value) if value.is_finite() && value > 0.0 => Ok(value * scale),
+        _ => Err(format!("{text:?} is not a frequency such as \"40MHz\"")),
+    }
 }
 
 /// Find the configuration: `--config` if given, otherwise the nearest
@@ -212,6 +229,18 @@ pub fn load_config(config_file: &Path, env: &Env) -> Result<Config> {
     let rtos = table(&document, "rtos")?;
     let trace32 = table(&document, "trace32")?;
     let rtt = table(&document, "rtt")?;
+    let mut clock = Vec::new();
+    for (name, value) in table(&document, "clock")?.into_iter().flatten() {
+        let frequency = match value {
+            Value::String(text) => parse_frequency(text),
+            Value::Integer(hz) if *hz > 0 => Ok(*hz as f64),
+            _ => Err("it must be a frequency such as \"40MHz\" or a number of Hz".to_string()),
+        };
+        match frequency {
+            Ok(frequency) => clock.push((name.clone(), frequency)),
+            Err(error) => bail!("clock.{name}: {error}"),
+        }
+    }
 
     let config_dir = config_file
         .parent()
@@ -391,6 +420,7 @@ pub fn load_config(config_file: &Path, env: &Env) -> Result<Config> {
         rtt_symbol,
         rtt_control_block_address,
         rtt_poll_interval,
+        clock,
     };
     config.check_command_values()?;
     Ok(config)
@@ -691,6 +721,42 @@ poll_interval = 0.05
         assert_eq!(error.0, "trace32.rcl_port must be between 1 and 65535");
         let error = fixture.load(&[("T32_TIMEOUT", "0")]).unwrap_err();
         assert_eq!(error.0, "trace32.operation_timeout must be positive");
+    }
+
+    #[test]
+    fn clock_frequencies_are_parsed() {
+        assert_eq!(parse_frequency("40MHz"), Ok(40e6));
+        assert_eq!(parse_frequency(" 32.768 kHz "), Ok(32768.0));
+        assert_eq!(parse_frequency("8e6"), Ok(8e6));
+        assert_eq!(parse_frequency("1.2ghz"), Ok(1.2e9));
+        assert_eq!(parse_frequency("50 Hz"), Ok(50.0));
+        for text in ["", "MHz", "fast", "-1MHz", "0", "40 MHz MHz"] {
+            assert_eq!(
+                parse_frequency(text),
+                Err(format!("{text:?} is not a frequency such as \"40MHz\""))
+            );
+        }
+
+        let fixture = Fixture::new(&format!(
+            "{CONFIG}\n[clock]\nXOSC = \"40MHz\"\nRTC = 32768\n"
+        ));
+        let config = fixture.load(&[]).unwrap();
+        assert_eq!(
+            config.clock,
+            [("RTC".to_string(), 32768.0), ("XOSC".to_string(), 40e6)]
+        );
+        let fixture = Fixture::new(&format!("{CONFIG}\n[clock]\nXOSC = \"forty\"\n"));
+        assert_eq!(
+            fixture.load(&[]).unwrap_err().0,
+            "clock.XOSC: \"forty\" is not a frequency such as \"40MHz\""
+        );
+        let fixture = Fixture::new(&format!("{CONFIG}\n[clock]\nXOSC = true\n"));
+        assert_eq!(
+            fixture.load(&[]).unwrap_err().0,
+            "clock.XOSC: it must be a frequency such as \"40MHz\" or a number of Hz"
+        );
+        // Without [clock] there are none.
+        assert!(Fixture::new(CONFIG).load(&[]).unwrap().clock.is_empty());
     }
 
     #[test]

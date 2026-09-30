@@ -283,7 +283,8 @@ id 回绕：… fe → 00 → 01
 | 8.1 debug 硬件反馈修复 | ✅ 0.1.6 已在硬件上确认 C15 地址、歧义报错、PAR_256 报错、fault 无异常 | 7f15cb2 |
 | 8.2 debug 第二轮修复 | ✅ 0.1.7 在硬件上全部确认 | 8cac1b8 |
 | 8.3 BITFLD 文字、部分路径提示 | ✅ 离线测试，并用真实 persr6p6.per 抽查；用户要求修完直接发布（0.1.8），待硬件复测 | 见 git log |
-| 8.4 输出加颜色（先 debug，后其他命令） | ✅ 单测、e2e，并在 pty 里对着假 RCL 服务端跑过会话；未发布 | 见 git log |
+| 8.4 输出加颜色（先 debug，后其他命令） | ✅ 单测、e2e，并在 pty 里对着假 RCL 服务端跑过会话；0.1.9 已发布 | 见 git log |
+| 8.5 `debug clock` 时钟树 | ✅ 单测、e2e；SR6P6 描述文件用 SDK 默认配置的寄存器值离线核对过；**未在硬件上跑过**，未发布 | 见 git log |
 
 **debug 的决定**（2026-09-29，任务说明是本地文件 `tracebridge-debug-prompt.md`，里面有项目数据，不提交；用户让我自己定这些点）：
 - 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`。
@@ -296,6 +297,13 @@ id 回绕：… fe → 00 → 01
   - stderr 上的 `tracebridge:` 前缀：错误红色（包括 `main.rs` 顶层的错误），警告和 PER.ReProgram 提示黄色。
   - 其他命令：`config` 的 ok 绿、MISSING 红、WARN 黄，键名和 ports/run/exe/note 青色；`chips` 里 `flash` 会用的那一行 `*` 绿、路径加粗，`@Chip` 列青色，`(no PREPAREONLY)` 黄色；`init` 的下一步里命令青色、注释变暗；`flash`/`load` 最后一行成功信息绿色；`vscode`/`rustrover` 的 installed 绿，backed up/unchanged 变暗；`rtt` 只给 stderr 上的状态行上色（`TRACE32 RTT:` 青色、`[rtt]` 黄色），目标输出的字节原样透传。
   - **两处不动**：`info` 的 `[tracebridge]` 前缀仍然始终是青色、不判断 TTY（「已定的实现决策」第 7 条）；`adapter` 代理的日志始终是纯文本，因为 VS Code 的 beginsPattern/endsPattern 和 LSP4IJ 的 debugServerReadyPattern 要匹配这些行。
+- **时钟树**（2026-09-30，第 8.5 阶段）。用户要求："跑完后告诉我完整的时钟树信息，我自己可能只需要写一个晶振频率"，并且明确说不要针对某个项目的 check 文件。实现在 `debug/clock.rs`，命令是 `tracebridge debug clock [时钟=频率…] [--tree 文件]`（R 类）：
+  - **引擎通用，芯片知识放在描述文件里**，和烧录脚本一样按芯片名（`flash.chip`，空则 `target.cpu`）从 `~/.config/tracebridge/clock/*.toml` 选；匹配规则复用 `flash::glob_match`/`specificity`，平局报错。仓库里只有虚构芯片的 `docs/clock-example.toml`（测试也用它）。
+  - **SR6P6 的描述文件在 `~/.config/tracebridge/clock/sr6p6.toml`，不得提交进仓库**：它的公式和选择器编码来自 RM0496，该手册每页都标着 "ST RESTRICTED – SUBJECT TO NON-DISCLOSURE AGREEMENT"。来源：RM0496 Rev 3 第 42–44 章（公式 15、25–31，表 980、999 等）、StellarSDK-6.0.1 `clock.h`（时钟名）、`persr6p6.per`（地址）。用 SDK 默认配置的寄存器值离线算过，结果和 SDK 的宏一致（SYS_CLK_0 400 MHz、AIPS_FAST 100 MHz、PSI5_f189 约 6.0487 MHz 等）。没有描述的部分写在文件头：DRCLK_IO、PLL_HSM PHI、GTM_1_CLK、DTHDIS、FRAY/CAN 分频器的抖动注入。
+  - 描述文件格式：`chips`、`[reg]`（寄存器名 → `AD:0x…`，用 `Data.Long` 读，每个只读一次）、`[[clock]]`（`name`，`hz` 或不写表示由板子给出，`from` 或 `select`+`sources`，`mul`、`div`、`enable`、`warn`、`note`）。频率 = 源 × mul ÷ div。表达式支持数字、`REG[高:低]`、`+ - * / ^`、`== !=` 和括号，按 f64 计算。
+  - 板子只提供寄存器里读不到的频率：`trace32.toml` 的 `[clock]`（`Config.clock`，加载时校验）或命令行 `XOSC=40MHz`，命令行优先；名字必须是描述文件里的根时钟。带 `hz` 的根时钟也能这样覆盖。
+  - 状态：频率、`off`（enable 为 0，或 div 为 0）、`?`（输入没给，或选择器的值不在 `sources` 里）、`error`（寄存器读失败或表达式出错，退出码 1）。源是 off 的时钟直接显示"源已关闭"。缺输入不算错误，末尾提示怎么给。
+  - 输出按"谁的源是谁"缩进成树，所以树的形状随选择器变化。`--json` 里有每个时钟的源、状态、Hz，以及每个寄存器的地址和值。
 - 读取一律在 PowerView 端求值（`Data.Long`、`Register`、`PER.VALUE`、`sYmbol.*`）；只有 `verify` 用原始内存 API，而且只读 `AD:`。
 - `PER.Set.CONDitions`：第一次用 PER 函数前、S 命令之后、调试器状态（`SYStem.Mode()`、`STATE.RUN()`）变化后、核在运行时，每次都重新快照。失败只警告。
 - `verify` 默认自己比较（PT_LOAD、`p_paddr`、`AD:`），因为只有这样才能数出差异字节数；手册说 `Data.LOAD.Elf` 默认按 `p_paddr` 加载（`/LOGLOAD` 才改用 `p_vaddr`），`--t32` 额外跑 `/DIFF /PHYSLOAD /NoRegister /NosYmbol /NoClear` 做对照。

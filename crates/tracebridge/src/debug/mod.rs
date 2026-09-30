@@ -7,6 +7,7 @@
 //! side effects, so an allowlist of them is safe.
 
 mod check;
+mod clock;
 mod commands;
 mod decode;
 mod elf;
@@ -103,6 +104,15 @@ pub enum DebugCommand {
         #[arg(long, conflicts_with = "halt")]
         dry_run: bool,
     },
+    /// [R] Clock tree with frequencies, computed from the clock registers
+    Clock {
+        /// Frequencies only the board knows, e.g. XOSC=40MHz (default: [clock] in trace32.toml)
+        #[arg(value_name = "CLOCK=FREQUENCY")]
+        inputs: Vec<String>,
+        /// Clock tree description (default: chosen by chip from ~/.config/tracebridge/clock)
+        #[arg(long, value_name = "FILE")]
+        tree: Option<PathBuf>,
+    },
     /// [UI] Open a PER.Watch window with these registers (names, or a file with one per line)
     Watch {
         #[arg(required = true, value_name = "FILE|NAME")]
@@ -140,6 +150,7 @@ impl DebugCommand {
             DebugCommand::Eval { .. } => "eval",
             DebugCommand::Verify { .. } => "verify",
             DebugCommand::Check { .. } => "check",
+            DebugCommand::Clock { .. } => "clock",
             DebugCommand::Watch { .. } => "watch",
             DebugCommand::Attach => "attach",
             DebugCommand::Down => "down",
@@ -236,6 +247,7 @@ pub fn execute(ctx: &mut Context, command: &DebugCommand) -> DResult<Outcome> {
                 dry_run: *dry_run,
             },
         ),
+        DebugCommand::Clock { inputs, tree } => commands::clock(ctx, inputs, tree.as_deref()),
         DebugCommand::Watch { items } => commands::watch(ctx, items),
         DebugCommand::Attach => commands::attach(ctx),
         DebugCommand::Down => commands::command(ctx, "SYStem.Down", "SYStem.Down done"),
