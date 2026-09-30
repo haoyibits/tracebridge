@@ -284,7 +284,7 @@ id 回绕：… fe → 00 → 01
 | 8.2 debug 第二轮修复 | ✅ 0.1.7 在硬件上全部确认 | 8cac1b8 |
 | 8.3 BITFLD 文字、部分路径提示 | ✅ 离线测试，并用真实 persr6p6.per 抽查；用户要求修完直接发布（0.1.8），待硬件复测 | 见 git log |
 | 8.4 输出加颜色（先 debug，后其他命令） | ✅ 单测、e2e，并在 pty 里对着假 RCL 服务端跑过会话；0.1.9 已发布 | 见 git log |
-| 8.5 `debug clock` 时钟树 | ✅ 单测、e2e；SR6P6 描述文件用 SDK 默认配置的寄存器值离线核对过；0.1.10 在 SR6P6 上跑通；树形连线和 `--html` 在 0.1.11 发布，`--html` 未在硬件上跑过 | 见 git log |
+| 8.5 `debug clock` 时钟树 | ✅ 单测、e2e；SR6P6 描述文件用 SDK 默认配置的寄存器值离线核对过；0.1.10 在 SR6P6 上跑通；树形连线和 `--html` 在 0.1.11 发布；按模块的视图在 0.1.12 发布，用开发版对着真板生成过 | 见 git log |
 
 **debug 的决定**（2026-09-29，任务说明是本地文件 `tracebridge-debug-prompt.md`，里面有项目数据，不提交；用户让我自己定这些点）：
 - 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`。
