@@ -150,6 +150,7 @@ execute-never). After the script, tracebridge runs:
 ```text
 FLASH.ReProgram ALL /Erase
 Data.LOAD.Elf <elf>
+Data.LOAD.Elf <extra_elf> /NoClear     (once per extra image, if any)
 FLASH.ReProgram OFF
 SYStem.Down
 SYStem.Up
@@ -205,6 +206,41 @@ cp sr6p6.cmm ~/.config/tracebridge/flash/
 
 Keep scripts that come with a TRACE32-only license out of public
 repositories; the library is the place for them.
+
+### Several images: `extra_elf`
+
+Some targets run more than one separately linked program, for example a
+hypervisor and a guest, or a bootloader and an application, each in its own
+part of the flash. List the others next to `elf`:
+
+```toml
+[project]
+elf = "build/hypervisor.elf"
+extra_elf = ["build/guest.elf"]
+```
+
+`FLASH.ReProgram ALL /Erase` erases every sector the flash script declares
+that the session does not write. Flashing the images one after another
+would therefore erase the earlier ones. With `extra_elf`, every command
+handles all the images together:
+
+| Command | What happens to the extra images |
+|---|---|
+| `flash` | programmed in the same `FLASH.ReProgram` session as `elf`, after it (`Data.LOAD.Elf ... /NoClear`, so the symbols already loaded stay) |
+| `load` | their symbols are loaded after `elf`'s (`/NoCODE /NoClear`), so a debugger session sees every program |
+| `debug verify` (no path) | each image is compared with the target in turn; the result matches only if every one does |
+| `config` | listed, with whether the file exists |
+
+`EXTRA_ELF` overrides the list for one run. It is split like a shell
+command line, and set but empty means no extra image:
+
+```sh
+EXTRA_ELF="build/guest.elf build/other.elf" tracebridge flash
+EXTRA_ELF= tracebridge flash      # only elf; the other images' sectors are erased
+```
+
+Versions before 0.1.14 ignore `extra_elf` without a warning, and a flash
+then erases the extra images.
 
 ## Debugging from an IDE
 

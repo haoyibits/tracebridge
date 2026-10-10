@@ -86,7 +86,7 @@ tracebridge vscode          # 或者：tracebridge rustrover
 - `PROGRAM_NAME`、`T32_CPU` 这类变量只要设置了，即使是空值也会生效。
 - `T32_SYS`、`ELF` 这类变量是空值时会被忽略。
 - `T32_FLASH_ARGS` 按 shell 规则拆分成参数。
-- `project.extra_elf` 列出要和 `elf` 一起烧录的镜像（例如单独链接的另一个程序）。它们在同一次烧录会话里写入，因为 `FLASH.ReProgram ALL /Erase` 会擦掉这次没写到的已声明扇区，分开烧会把前一个擦掉。`load` 和 `debug verify` 也会一并处理它们。环境变量 `EXTRA_ELF` 按 shell 规则拆分，设为空值表示没有附加镜像。
+- `project.extra_elf` 列出要和 `elf` 一起烧录、加载、核对的其他镜像，见[多个镜像一起烧录](#多个镜像一起烧录extra_elf)。
 
 运行时文件（PowerView 日志、工具栏脚本）写在 `<项目>/.tracebridge/`，这个目录里自带 `.gitignore`。
 
@@ -94,7 +94,7 @@ tracebridge vscode          # 或者：tracebridge rustrover
 
 ### 烧录脚本怎么选
 
-烧录脚本必须支持 `PREPAREONLY` 约定：脚本只初始化目标板、声明 Flash，然后返回。之后由 tracebridge 执行 `FLASH.ReProgram ALL /Erase`、`Data.LOAD.Elf`、`FLASH.ReProgram OFF`、`SYStem.Down`、`SYStem.Up`。
+烧录脚本必须支持 `PREPAREONLY` 约定：脚本只初始化目标板、声明 Flash，然后返回。之后由 tracebridge 执行 `FLASH.ReProgram ALL /Erase`、`Data.LOAD.Elf`（有 `extra_elf` 时，每个附加镜像再执行一次，带 `/NoClear`）、`FLASH.ReProgram OFF`、`SYStem.Down`、`SYStem.Up`。
 
 如果执行 `flash` 时系统已经是 Up 状态，tracebridge 会先执行 `SYStem.Down`。原因是官方烧录脚本只在系统 Down 时才复位并初始化芯片；系统已经 Up 时，烧录算法会直接在应用留下的状态里运行，比如应用已经用 MPU 把算法所在的 RAM 设成不可执行，烧录就会失败。
 
@@ -126,6 +126,34 @@ tracebridge flash --script <路径>    # 临时指定脚本
 ```
 
 往脚本库里加脚本：复制过去，并确认头部有一行 `; @Chip: <芯片名>`。修改官方脚本时，请保持它的参数（`PREPAREONLY`、`DUALPORT=` 等）不变，这样脚本库里的版本和原版用法完全一样。许可证写着仅限 TRACE32 使用的脚本不要提交进公开仓库，放在脚本库里就好。
+
+### 多个镜像一起烧录：`extra_elf`
+
+有的目标板上跑着几个分别链接的程序，比如 hypervisor 和 Guest，或者 bootloader 和应用，各占 flash 的一部分。把其他镜像写在 `elf` 旁边：
+
+```toml
+[project]
+elf = "build/hypervisor.elf"
+extra_elf = ["build/guest.elf"]
+```
+
+`FLASH.ReProgram ALL /Erase` 会擦掉烧录脚本声明的、这次会话没有写到的所有扇区，所以一个接一个地烧，后烧的会把先烧的擦掉。写了 `extra_elf` 之后，每个命令都会一起处理所有镜像：
+
+| 命令 | 对附加镜像做什么 |
+|---|---|
+| `flash` | 在同一次 `FLASH.ReProgram` 会话里、`elf` 之后写入（`Data.LOAD.Elf ... /NoClear`，已加载的符号保留） |
+| `load` | 在 `elf` 之后加载它们的符号（`/NoCODE /NoClear`），调试时每个程序的符号都在 |
+| `debug verify`（不带路径） | 逐个和目标板比对，全部一致才算一致 |
+| `config` | 列出来，并显示文件是否存在 |
+
+环境变量 `EXTRA_ELF` 在一次运行里覆盖这个列表，按 shell 规则拆分；设为空值表示没有附加镜像：
+
+```sh
+EXTRA_ELF="build/guest.elf build/other.elf" tracebridge flash
+EXTRA_ELF= tracebridge flash      # 只烧 elf；其他镜像所在的扇区会被擦掉
+```
+
+0.1.14 之前的版本会不加提示地忽略 `extra_elf`，烧录时会把附加镜像擦掉。
 
 ## 在 IDE 里调试
 
