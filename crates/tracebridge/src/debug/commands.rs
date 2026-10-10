@@ -603,12 +603,38 @@ fn resolve_file(cwd: &Path, path: &Path) -> PathBuf {
 }
 
 /// R: compare the ELF's `PT_LOAD` content with target memory at the load
-/// addresses; `t32` also asks TRACE32 (`Data.LOAD.Elf /DIFF`).
+/// addresses; `t32` also asks TRACE32 (`Data.LOAD.Elf /DIFF`). Without a
+/// path: `project.elf` and every `project.extra_elf`, each in turn; the
+/// result matches only if every image does.
 pub fn verify(ctx: &mut Context, elf_path: Option<&Path>, t32: bool) -> DResult<Outcome> {
-    let path = match elf_path {
-        Some(path) => resolve_file(ctx.cwd, path),
-        None => ctx.config.elf.clone(),
+    let paths = match elf_path {
+        Some(path) => vec![resolve_file(ctx.cwd, path)],
+        None => std::iter::once(ctx.config.elf.clone())
+            .chain(ctx.config.extra_elf.iter().cloned())
+            .collect(),
     };
+    if paths.len() == 1 {
+        return verify_one(ctx, paths[0].clone(), t32);
+    }
+    let mut texts = Vec::new();
+    let mut images = Vec::new();
+    let mut code = 0;
+    for path in paths {
+        let outcome = verify_one(ctx, path, t32)?;
+        texts.push(outcome.text);
+        images.push(outcome.json);
+        if outcome.code != 0 {
+            code = outcome.code;
+        }
+    }
+    Ok(Outcome {
+        text: texts.join("\n"),
+        json: json!({"match": code == 0, "images": images}),
+        code,
+    })
+}
+
+fn verify_one(ctx: &mut Context, path: std::path::PathBuf, t32: bool) -> DResult<Outcome> {
     let bytes = std::fs::read(&path)
         .map_err(|error| DebugError::new(format!("cannot read {}: {error}", path.display())))?;
     let segments = elf::load_segments(&bytes)

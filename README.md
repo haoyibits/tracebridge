@@ -103,7 +103,7 @@ to the directory that contains it. `tracebridge init` writes this template:
 
 | Section | Keys |
 |---|---|
-| `[project]` | `program` (TRACE32 program name), `elf` |
+| `[project]` | `program` (TRACE32 program name), `elf`, `extra_elf` (further images flashed, loaded and verified together with `elf`) |
 | `[target]` | `cpu`, `cores`, `mem_access`, `jtag_clock`, `dual_port` |
 | `[rtos]` | `config`, `menu`, `show_tasks` (empty = no RTOS awareness) |
 | `[flash]` | `chip` or `script` (see below), `args` |
@@ -123,6 +123,7 @@ environment, then `trace32.toml`, then defaults:
 | `T32_FLASH_CHIP` | `flash.chip` | ignored |
 | `PROGRAM_NAME`, `T32_CPU`, `T32_CORES`, `T32_MEMACCESS`, `T32_JTAG_CLOCK`, `T32_DUALPORT`, `T32_FLASH_SCRIPT` | the same keys | **used** (clears the value) |
 | `T32_FLASH_ARGS` | `flash.args`, split like a shell command line | **used** (no arguments) |
+| `EXTRA_ELF` | `project.extra_elf`, split like a shell command line | **used** (no extra image) |
 | `T32_RCL_PORT`, `T32_DAP_PORT`, `T32_DAP_BACKEND_PORT`, `T32_DAP_BACKEND_TIMEOUT`, `T32_TIMEOUT` | ports and timeouts | ignored |
 | `T32_DAP_DEBUG=1` | debug logging of `t32debugadapter` | |
 

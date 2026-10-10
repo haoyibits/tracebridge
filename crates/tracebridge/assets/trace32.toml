@@ -9,6 +9,10 @@
 program = "__PROGRAM__"
 # The ELF image flash and load use. tracebridge does not build it.
 elf = "build/__PROGRAM__.elf"
+# Further images programmed in the same flash session (one session, because
+# FLASH.ReProgram ALL /Erase clears every declared sector it does not write),
+# then loaded and verified with `elf`. Example: a separately linked image.
+extra_elf = []
 
 [target]
 cpu = "SR6P6"

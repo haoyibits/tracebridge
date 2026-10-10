@@ -35,6 +35,9 @@ pub fn validate_target_action(
     env: &Env,
 ) -> Result<Option<Choice>> {
     require_file(&config.elf, "ELF", false)?;
+    for extra in &config.extra_elf {
+        require_file(extra, "EXTRA_ELF", false)?;
+    }
     if action == Action::Load {
         return Ok(None);
     }
@@ -109,7 +112,16 @@ pub fn program(config: &Config, script: &str, debugger: &mut impl Rcl) -> t32rcl
         debugger.cmd(&format!("SYStem.JtagClock {}", config.jtag_clock))?;
     }
     debugger.cmd("FLASH.ReProgram ALL /Erase")?;
-    let loaded = debugger.cmd(&format!("Data.LOAD.Elf \"{}\"", config.elf.display()));
+    // Every image in one session: /Erase clears every declared sector that
+    // the session does not write, so programming them one at a time would
+    // erase the earlier ones. /NoClear keeps the symbols already loaded.
+    let loaded = (|| -> t32rcl::Result<()> {
+        debugger.cmd(&format!("Data.LOAD.Elf \"{}\"", config.elf.display()))?;
+        for extra in &config.extra_elf {
+            debugger.cmd(&format!("Data.LOAD.Elf \"{}\" /NoClear", extra.display()))?;
+        }
+        Ok(())
+    })();
     // Always leave FLASH.ReProgram mode; a load failure is the primary error.
     let left = debugger.cmd("FLASH.ReProgram OFF");
     loaded?;
@@ -122,7 +134,11 @@ pub fn program(config: &Config, script: &str, debugger: &mut impl Rcl) -> t32rcl
     }
     debugger.cmd("SYStem.Option.IMASKASM ON")?;
     debugger.cmd("SYStem.Option.IMASKHLL ON")?;
-    debugger.print(&format!("tracebridge: flashed {}", config.elf.display()))
+    debugger.print(&format!("tracebridge: flashed {}", config.elf.display()))?;
+    for extra in &config.extra_elf {
+        debugger.print(&format!("tracebridge: flashed {}", extra.display()))?;
+    }
+    Ok(())
 }
 
 /// The commands that attach to a target whose system is not up, without a
@@ -154,6 +170,12 @@ pub fn setup_debug(config: &Config, debugger: &mut impl Rcl) -> t32rcl::Result<(
         "Data.LOAD.Elf \"{}\" /NoCODE",
         config.elf.display()
     ))?;
+    for extra in &config.extra_elf {
+        debugger.cmd(&format!(
+            "Data.LOAD.Elf \"{}\" /NoCODE /NoClear",
+            extra.display()
+        ))?;
+    }
     if !config.dual_port.is_empty() {
         debugger.cmd(&format!("SYStem.Option.DUALPORT {}", config.dual_port))?;
     }
@@ -197,6 +219,7 @@ pub mod tests {
             project_dir: root.to_path_buf(),
             program: "demo".into(),
             elf,
+            extra_elf: Vec::new(),
             cpu: "CPU".into(),
             cores: "1.".into(),
             mem_access: String::new(),
@@ -363,6 +386,58 @@ pub mod tests {
                 "print tracebridge: symbols loaded for demo".into(),
             ]
         );
+    }
+
+    #[test]
+    fn extra_images_are_programmed_and_loaded_in_the_same_session() {
+        let (dir, mut config) = fixture();
+        let guest = dir.path().join("guest.elf");
+        std::fs::write(&guest, b"\x7fELF").unwrap();
+        config.extra_elf = vec![guest.clone()];
+        let mut recorder = Recorder {
+            system_up: true,
+            state_run: true,
+            ..Default::default()
+        };
+        run_sequence(
+            &config,
+            Some(&config.resolved_flash_script()),
+            &mut recorder,
+        )
+        .unwrap();
+        let elf = config.elf.display();
+        let guest = guest.display();
+        let calls = &recorder.calls;
+        let erase = calls
+            .iter()
+            .position(|c| c == "cmd FLASH.ReProgram ALL /Erase")
+            .unwrap();
+        // Both images between /Erase and OFF; the second keeps the symbols.
+        assert_eq!(
+            calls[erase + 1..erase + 4],
+            [
+                format!("cmd Data.LOAD.Elf \"{elf}\""),
+                format!("cmd Data.LOAD.Elf \"{guest}\" /NoClear"),
+                "cmd FLASH.ReProgram OFF".to_string(),
+            ]
+        );
+        assert!(calls.contains(&format!("print tracebridge: flashed {guest}")));
+        let symbols = calls
+            .iter()
+            .position(|c| *c == format!("cmd Data.LOAD.Elf \"{elf}\" /NoCODE"))
+            .unwrap();
+        assert_eq!(
+            calls[symbols + 1],
+            format!("cmd Data.LOAD.Elf \"{guest}\" /NoCODE /NoClear")
+        );
+    }
+
+    #[test]
+    fn a_missing_extra_image_stops_before_anything_runs() {
+        let (dir, mut config) = fixture();
+        config.extra_elf = vec![dir.path().join("missing.elf")];
+        let error = validate_target_action(&config, Action::Load, &Env::new()).unwrap_err();
+        assert!(error.to_string().contains("EXTRA_ELF"), "{error}");
     }
 
     #[test]

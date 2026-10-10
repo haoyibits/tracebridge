@@ -86,6 +86,7 @@ tracebridge vscode          # 或者：tracebridge rustrover
 - `PROGRAM_NAME`、`T32_CPU` 这类变量只要设置了，即使是空值也会生效。
 - `T32_SYS`、`ELF` 这类变量是空值时会被忽略。
 - `T32_FLASH_ARGS` 按 shell 规则拆分成参数。
+- `project.extra_elf` 列出要和 `elf` 一起烧录的镜像（例如单独链接的另一个程序）。它们在同一次烧录会话里写入，因为 `FLASH.ReProgram ALL /Erase` 会擦掉这次没写到的已声明扇区，分开烧会把前一个擦掉。`load` 和 `debug verify` 也会一并处理它们。环境变量 `EXTRA_ELF` 按 shell 规则拆分，设为空值表示没有附加镜像。
 
 运行时文件（PowerView 日志、工具栏脚本）写在 `<项目>/.tracebridge/`，这个目录里自带 `.gitignore`。
 

@@ -374,6 +374,14 @@ fn print_config(config: &Config, env: &pycompat::Env) {
             path.display()
         );
     }
+    for path in &config.extra_elf {
+        println!(
+            "  {} {}={}",
+            status(style, path.exists()),
+            style.label("EXTRA_ELF"),
+            path.display()
+        );
+    }
     let script = style.label("flash script");
     match flash::resolve(config, env) {
         Ok(choice @ flash::Choice::Explicit(_)) => {

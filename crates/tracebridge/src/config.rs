@@ -25,6 +25,10 @@ pub struct Config {
     pub project_dir: PathBuf,
     pub program: String,
     pub elf: PathBuf,
+    /// `project.extra_elf` / `EXTRA_ELF`: further images programmed in the
+    /// same flash session as `elf`, loaded and verified with it (for
+    /// example a separately linked Guest). Empty for a single image.
+    pub extra_elf: Vec<PathBuf>,
     pub cpu: String,
     pub cores: String,
     pub mem_access: String,
@@ -274,6 +278,13 @@ pub fn load_config(config_file: &Path, env: &Env) -> Result<Config> {
         &project_dir,
     );
 
+    // EXTRA_ELF is split like a shell command line, as T32_FLASH_ARGS: set
+    // and empty means no extra image.
+    let extra_elf = env_arguments(env, "EXTRA_ELF", string_list(project, "extra_elf")?)?
+        .iter()
+        .map(|value| resolve(Path::new(&expand_path(value, env)), &project_dir))
+        .collect();
+
     let toml_sys = text(trace32, "sys", "")?;
     let sys_default = if toml_sys.is_empty() {
         home(env).join("t32").to_string_lossy().into_owned()
@@ -396,6 +407,7 @@ pub fn load_config(config_file: &Path, env: &Env) -> Result<Config> {
         project_dir,
         program,
         elf,
+        extra_elf,
         cpu,
         cores,
         mem_access,
@@ -555,6 +567,39 @@ poll_interval = 0.05
         fn replace(&self, from: &str, to: &str) {
             fs::write(self.file(), CONFIG.replace(from, to)).unwrap();
         }
+    }
+
+    #[test]
+    fn extra_images_come_from_the_file_or_the_environment() {
+        let fixture = Fixture::new(CONFIG);
+        assert!(fixture.load(&[]).unwrap().extra_elf.is_empty());
+
+        fixture.replace(
+            "elf = \"build/demo.elf\"",
+            "elf = \"build/demo.elf\"\nextra_elf = [\"guest/a.elf\", \"/abs/b.elf\"]",
+        );
+        let config = fixture.load(&[]).unwrap();
+        assert_eq!(
+            config.extra_elf,
+            [
+                fixture.root.join("guest/a.elf"),
+                PathBuf::from("/abs/b.elf")
+            ]
+        );
+
+        // Split like a shell line; set but empty means none.
+        let config = fixture.load(&[("EXTRA_ELF", "x.elf 'y z.elf'")]).unwrap();
+        assert_eq!(
+            config.extra_elf,
+            [fixture.root.join("x.elf"), fixture.root.join("y z.elf")]
+        );
+        assert!(
+            fixture
+                .load(&[("EXTRA_ELF", "")])
+                .unwrap()
+                .extra_elf
+                .is_empty()
+        );
     }
 
     // test_config.py: test_loads_typed_configuration_and_resolves_paths
