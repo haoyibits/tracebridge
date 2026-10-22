@@ -22,6 +22,15 @@
 - 用纯 Rust 实现 RCL 的 TCP 协议，**不链接 Lauterbach C API**，也不做 UDP。
 - 功能和对外行为跟 Python 版一致，下面「新旧差异」列出的除外。
 
+## 定位（2026-10-22，用户确认）
+tracebridge 是 rustvisor（实际在用的是 `../rustvisor-sdk`，`../rustvisor` 是 9 月前的旧目录）板级 runner 里的 TRACE32 后端：
+- **代码保持通用**：引擎在 tracebridge，板子知识放数据文件（烧录脚本和时钟描述在 `~/.config/tracebridge/`，check 文件在项目里）。tracebridge 的代码里不写任何板子或 rustvisor 专用的东西。
+- **做什么由 rustvisor 的实际需要决定**：不为假想的其他用户泛化（不主动支持其他架构的 fault 解码、Windows 等），等真有第二块板或第二个用户再按需扩展。仓库照常开源、Homebrew 照常发布，但不当产品推广。
+- **划界**：
+  - 放进 tracebridge：跟 TRACE32 或"项目加 TRACE32"的工作流有关，并且换一块用 TRACE32 的板子不改代码也能用（数据驱动）。
+  - 放进 rustvisor-sdk：rustvisor 自己的约定（诊断记录格式、镜像头检查、延迟统计、验收流程）。将来由 `rustvisor flash/run` 调用 tracebridge：rustvisor-sdk 的 `docs/design-plan.md` 第 7.5 节规定它们通过 board runner 工作，runner 写在板子的 `host/build.toml` 里。rustvisor 也可能用 StellarLINK 等其他调试器，那是另一个 runner，不进 tracebridge。这也是不把 tracebridge 并进 rustvisor-sdk 的原因。
+  - 交给官方：AI 的通用调试（t32mcp，见第 9 阶段），以后的 IDE 集成看官方进展。
+
 ## 新旧差异（这是重写的核心动机）
 Python 版假设工具包被复制进项目目录（config.py 的 TOOLKIT_DIR、trace32.toml 里的 root = ".."、install-vscode 最后执行 clean_toolkit）。新版是全局 CLI：
 1. 配置发现：优先用 `--config <path>`；否则从 cwd 往上逐级找 `trace32.toml`，行为类似 git 找 .git。项目根目录 = toml 所在目录，所有相对路径以它为基准。
@@ -288,6 +297,7 @@ id 回绕：… fe → 00 → 01
 | 8.5 `debug clock` 时钟树 | ✅ 单测、e2e；SR6P6 描述文件用 SDK 默认配置的寄存器值离线核对过；0.1.10 在 SR6P6 上跑通；树形连线和 `--html` 在 0.1.11 发布；按模块的视图在 0.1.12 发布，用开发版对着真板生成过；来源视图的粗线和未选输入列表在 0.1.13 发布 | 见 git log |
 | 8.6 `extra_elf`：多个镜像同一次烧录、加载、核对 | ✅ 单测（命令序列、配置与环境变量、缺文件报错）；0.1.14 发布；还没在硬件上跑过（rustvisor S4b 用它烧 EL2 镜像加 Guest） | 见 git log |
 | 9 与官方 t32mcp 配合 | ✅ 单测、e2e；未发布；Remote API 只监听本机、PowerView 忙时不动、`skill` 命令都还没在真 PowerView 上验证 | 见 git log |
+| 10 rustvisor 需要的通用功能（第一批） | ✅ 单测、CLI 测试；未发布；`debug reset`、`debug do`、check 读时钟、HC15 回退都还没上板 | 见 git log |
 
 **debug 的决定**（2026-09-29，任务说明是本地文件 `tracebridge-debug-prompt.md`，里面有项目数据，不提交；用户让我自己定这些点）：
 - 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`。
@@ -365,6 +375,14 @@ id 回绕：… fe → 00 → 01
 - **IDE**：Lauterbach 和 JetBrains 在 2026-10-13 公布了 CLion 的 TRACE32 集成（DAP，TRACE32 Debug Adapter 0.1.2，需要 PowerView 09.2026 或 build 195402；这个正式版截至 2026-10-22 还没发布，用户装的是 R.2026.02）。对 Rust 项目暂时没用：CLion 和 RustRover 都不能把 DAP 调试器挂到 Cargo 运行配置上（JetBrains YouTrack RUST-12476，2026-08 仍未解决）。所以 `rustrover`（LSP4IJ）和 `adapter` 的 launch→attach 改写继续保留，等 RUST-12476 解决后再评估。
 - 本机 t32mcp 在 `~/Documents/Code/t32mcp`（v0.3.0，自己编译）。用户级 MCP 配置原来写的是 `--execution-policy all --skill-root`（照 skills 0.1.0 里 `lauterbach-t32mcp` 的说明写的），0.3.0 不认这两个参数，已改成 `--execution-policy unrestricted --skills ~/.claude/skills`。
 
+**第 10 阶段：rustvisor 需要的通用功能，第一批**（2026-10-22）。依据是 rustvisor-sdk 的验收脚本（`el2/platform/boards/stellar-sr6p6/tools/t32/` 下的 `s3`～`s5_acceptance.sh`、`irq_latency.sh` 和几个 Python 辅助脚本）以及它文档里明确提出的需求。每一项都按"定位"里的划界规则判断过：不含板子或 rustvisor 专用的东西。
+- **`debug reset`**（S）：`SYStem.Down`、`SYStem.RESet`，再按配置设 `SYStem.CPU`、`SYStem.MemAccess`、`CORE.ASSIGN`，然后 `SYStem.Mode Up` 和 `SYStem.JtagClock`（`target::reset_commands`）。顺序照 rustvisor-sdk 在板上验证过的序列，复位后核停在复位向量（它在 SR6P6 上读到 `0x29FB8100`）。原因：同一串命令手抄在 4 个脚本里，参数又和 `trace32.toml` 重复；`s3_design.md` 记录过一次漏了 `CORE.ASSIGN 1.`，结果 `SYStem.Mode Up` 报 "debug port fail"。`target.cpu` 为空时报错（`SYStem.RESet` 会清掉 CPU 设置）；有 PRACTICE 脚本在运行时拒绝执行（`probe::require_idle`，判断和提示与 flash/load 相同）。
+- **check 文件读时钟**：`read = { clock = "<名字>" }`，`expect` 可以写 `state`（"on"/"off"）、`hz`（误差半赫兹以内算相等，并隐含 on）、`source`、`warnings`（集合相等），至少写一项；这一组只能配 `read.clock`，数值类的 expect 不能配它。判断规则照抄 rustvisor-sdk 的 `clock_expect.py`，`s3_design.md` 里明确写了"tracebridge 若给 check 增加 `read = { clock = ... }`，这个脚本就可以去掉"。时钟树在 `--halt` 停核之后求一次，所有时钟检查共用；描述文件按芯片名查找，和 `debug clock` 相同，`[clock]` 频率也来自 `trace32.toml`。`--dry-run` 只检查时钟名是否在描述文件里。结果的值列显示文字（`on 400 MHz from PLL ! not locked`），JSON 里 `value` 是取整后的 Hz，`hex` 为空，另有 `text`。
+- **`debug do <脚本> [参数]`**（S）：`DO` 之后等脚本结束。原因：`debug cmd "DO …"` 在脚本一开始就返回，`irq_latency.sh` 紧接着发 `debug go`，两者的先后顺序没有保证。做法照 t32mcp：先 `ERROR.RESet`；轮询 `PRACTICE.SD()` 和 `T32_GetPracticeState`；连续两次"不在运行"才算停下；停在错误上（`ERROR.OCCURRED()`）就报告 `ERROR.MESSAGE()` 和 `ERROR.CMDLINE()`，用 `END` 结束脚本（最多 50 次，每次等 50 ms），再 `ERROR.RESet`；停在对话框或 `STOP` 上则保持不动，交给用户；超时（默认 `operation_timeout`，可用 `--timeout`）就让它继续跑。相对路径相对当前目录，`~~` 开头的原样传给 TRACE32。`T32_GetPracticeState` 是从 Python 库的 `t32_getpracticestate` 移植的 `t32rcl::Debugger::practice_state`（cmd 0x72、opt 0x03、无负载，应答按小端整数解析），请求字节由 `tools/reference_bytes.py` 用 Python 库生成后写进了单测。
+- **HC15 回退**：`probe::read_long` 读 `C15:` 且 op1 = 4 的寄存器失败（连接没断）时，改用 `HC15:` 再读一次；还失败就报告原来的错误。依据是 Arm 调试器手册（debugger_arm.pdf 的 "Coprocessors" 一节）：带 Hyp 模式的核上，Hyp 专用的 CP15 寄存器可以用 `HC15:` 读，"independent of the current core mode"。手册举的是 Cortex-A7/A15，**R52 上是否可行未验证**。背景：`s4_plan.md` 记录，核停在 EL1 时读 `C15:0x4011` 报 "bus error at address EC15:0x4011"，所以验收只能让 EL2 先把状态写进内存记录。只覆盖 `read_long`（`fault`、check 的 `addr`、时钟寄存器）；`reg` 走 `PER.VALUE`，没有回退。`fault` 读不到时会说明核停在什么模式，不再笼统地说"需要带 Hyp 模式的核"。
+- **`config` 检查行号表**：ELF（包括 `extra_elf`）没有 `.debug_line` 时给 WARN（`debug/elf.rs` 的 `section_names`）。原因：用户问"为什么 List 窗口全是汇编，看不到 Rust 代码"，查下来 rustvisor-sdk 烧录的 release ELF 只有 `.symtab`，没有任何 `.debug_*` 节，因为 `[profile.release]` 没开调试信息。修法在 rustvisor-sdk：`[profile.release] debug = true`（只影响 ELF 文件，不改变烧进去的代码）。tracebridge 只负责提示。
+- **第二批（还没做）**：大块读内存（`debug mem` 最多 4096 个字，而且逐字用 `Data.Long`）、导出 trace（`Trace.EXPORT.Ascii` 解析成 JSON）、版本要求和未知配置项告警（旧版会静默忽略 `extra_elf`，用它烧录会擦掉 Guest）。多核（`--core`、多核 `CORE.ASSIGN`）等 rustvisor S5 的 C、D 段再做。
+
 **发布方案：手写 GitHub Actions，不用 cargo-dist。** 只有 4 个目标，产物就是 tar.gz 和 sha256，安装位置要求 `~/.local/bin`。cargo-dist 会生成它自己的安装器（默认装到 `~/.cargo/bin`），还要引入 dist 配置和每次重新生成的 workflow，收益小于维护成本。Linux 两个 musl 目标都在对应架构的原生 runner 上构建（ubuntu-24.04 / ubuntu-24.04-arm + musl-tools），不需要 cross；macOS 两个目标都在 macos-14 上构建。
 
 **Homebrew**：通过自己的 tap `haoyibits/homebrew-tap` 发布（`brew install haoyibits/tap/tracebridge`），暂不提交 homebrew-core。
@@ -391,6 +409,10 @@ id 回绕：… fe → 00 → 01
 14. **Remote API 只监听本机**：config.t32 加上 `REMOTEHOSTDENY` 并重启 PowerView 后，`lsof -nP -iTCP:20000 -sTCP:LISTEN` 应显示 `127.0.0.1:20000`，`tracebridge flash`、IDE 调试和 t32mcp 照常能连上。没有 RCL 段时，`tracebridge open` 启动的 PowerView 也应只监听 127.0.0.1。
 15. **PowerView 忙时不动**：在 PowerView 里运行一个停在 `STOP` 或对话框里的脚本，然后执行 `tracebridge flash`，应报 `PowerView is busy`，并且 PowerView 的状态没有变化；脚本结束后再执行，应正常烧录。同样试一次 t32mcp 正在跑脚本的情况。
 16. **skill**：执行 `tracebridge skill` 后开一个新的 Claude Code 会话，让它"烧录并读 HSR"，应该用 `tracebridge flash` 烧录，用 `tracebridge debug reg` 读寄存器，停核等通用操作用 t32mcp。
+17. **HC15**：让 Guest 停在 `wfi`（EL1），执行 `tracebridge debug eval "Data.Long(HC15:0x4011)"`，应读出 HCR；再执行 `tracebridge debug fault`，应能给出报告。读不出来就记下报错，并在第 10 阶段的说明里改成"不可行"。
+18. **`debug reset`**：在 rustvisor-sdk 里，用 `tracebridge debug reset` 替换 `reset_check` 里那 7 条 `debug cmd`，跑 `s5_acceptance.sh reset`，结果应和原来一样（核停在 `0x29FB8100`，复位检查全部通过）。
+19. **`debug do`**：跑一个正常结束的脚本、一个有错误命令的脚本、一个停在 `DIALOG.YESNO` 的脚本，分别应报告结束、报错并结束脚本、提示去 PowerView 处理。
+20. **check 读时钟**：把 `s3.clock.toml` 的几条期望改写成 `read.clock` 检查，在同一个镜像上和 `clock_expect.py` 对比，结论应一致。
 
 ### 阶段 0：通读和规划 ✅（本文档）
 

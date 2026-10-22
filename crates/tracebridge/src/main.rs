@@ -104,8 +104,8 @@ enum Command {
         /// Chip name or part of it, e.g. SR6P6 or STM32H743ZI (default: flash.chip or target.cpu)
         query: Option<String>,
     },
-    /// Inspect registers, memory and faults in the running PowerView; never resets
-    /// the target (see 'tracebridge debug --help')
+    /// Inspect registers, memory and faults in the running PowerView; only 'debug
+    /// reset' resets the target (see 'tracebridge debug --help')
     #[command(disable_help_flag = true)]
     Debug {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
@@ -397,6 +397,16 @@ fn print_config(config: &Config, env: &pycompat::Env) {
             style.label("EXTRA_ELF"),
             path.display()
         );
+    }
+    for path in std::iter::once(&config.elf).chain(&config.extra_elf) {
+        if debug::has_line_table(path) == Some(false) {
+            println!(
+                "  {} {} has no line table (.debug_line): TRACE32 shows its code as assembly \
+                 only; build it with debug info (Rust: debug = true in the Cargo profile, C: -g)",
+                style.warn("WARN   "),
+                path.display()
+            );
+        }
     }
     let script = style.label("flash script");
     match flash::resolve(config, env) {

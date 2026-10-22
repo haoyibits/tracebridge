@@ -29,11 +29,12 @@ advice not to drive the debugger by other means.
 | Start PowerView for this project | `tracebridge open` |
 | Program the flash with the project's ELF (and `extra_elf`) | `tracebridge flash` |
 | Attach without reset and load symbols | `tracebridge load` |
+| Reset to the reset vector with the project's debugger settings | `tracebridge debug reset` |
 | Which flash script a chip uses | `tracebridge chips <chip>` |
 | A register by PER name or field, with its address | `tracebridge debug reg <name>... --json` |
 | AArch32 Hyp fault: vector, HSR decoded, fault addresses | `tracebridge debug fault --json` |
 | Target memory against the ELF's loadable content | `tracebridge debug verify --json` |
-| A check file of expected register values | `tracebridge debug check <file> --json` |
+| A check file of expected register values and clocks | `tracebridge debug check <file> --json` |
 | Clock tree with frequencies | `tracebridge debug clock --json` |
 | Target output over SEGGER RTT | `timeout 10 tracebridge rtt --output-only` |
 
@@ -42,8 +43,11 @@ advice not to drive the debugger by other means.
 - Run tracebridge inside the project: it finds trace32.toml upwards from the
   current directory. Put `--json` after the command's arguments.
 - Ask the user before `flash`, `load`, `open`, `debug check --halt`, and
-  the `debug` commands `attach`, `down`, `break`, `go`, `cmd`. `flash` resets
-  the target and erases flash; it can take minutes, so raise the shell timeout.
+  the `debug` commands `attach`, `reset`, `down`, `break`, `go`, `do`, `cmd`.
+  `flash` resets the target and erases flash; it can take minutes, so raise
+  the shell timeout.
+- To run a PRACTICE script yourself, use t32mcp `trace32_run_script`; the
+  project's own scripts that a shell script runs use `tracebridge debug do`.
 - The read-only commands (`config`, `chips`, and `debug` `reg`, `fault`,
   `verify`, `check` without `--halt`, `clock`) never change the target.
 - `tracebridge debug` exit codes: 0 ok, 1 error, 2 usage error, 3 a check
@@ -54,10 +58,15 @@ advice not to drive the debugger by other means.
 
 ## Gotchas
 
-- One PowerView runs one PRACTICE script at a time. `flash` and `load` stop
-  with "PowerView is busy" while a script is active (also one t32mcp started),
-  and t32mcp reports busy while `flash` runs its flash script. Wait, and never
-  end a script you did not start without asking.
+- One PowerView runs one PRACTICE script at a time. `flash`, `load`,
+  `debug reset` and `debug do` stop with "PowerView is busy" while a script
+  is active (also one t32mcp started), and t32mcp reports busy while `flash`
+  runs its flash script. Wait, and never end a script you did not start
+  without asking.
+- PowerView shows the project's code only as assembly when the ELF has no
+  line table; `tracebridge config` warns about it. For Rust, a release build
+  needs `[profile.release] debug = true`. Do not change the user's build
+  profile without asking.
 - After `flash` and `load` the target runs. Halt it (`set_halted.cmm`) before
   reading core registers through t32mcp.
 - `rtt` keeps reading until it is stopped; always bound it with `timeout`.

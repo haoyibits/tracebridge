@@ -48,7 +48,7 @@ Without a command, an interactive session starts. Exit codes: 0 ok, 1 error,
     no_binary_name = true,
     disable_help_subcommand = true,
     disable_version_flag = true,
-    about = "Inspect the target through the running PowerView; never resets it",
+    about = "Inspect the target through the running PowerView; only 'reset' resets it",
     after_help = AFTER_HELP
 )]
 pub struct DebugCli {
@@ -124,12 +124,26 @@ pub enum DebugCommand {
     },
     /// [S] SYStem.Mode Attach: no reset, the core keeps running or stays halted
     Attach,
+    /// [S] Reset the chip through the debugger and halt at the reset vector, with the
+    /// CPU, memory access, cores and JTAG clock of trace32.toml
+    Reset,
     /// [S] SYStem.Down
     Down,
     /// [S] Halt the core
     Break,
     /// [S] Resume the core
     Go,
+    /// [S] Run a PRACTICE script (DO) and wait until it ends; one that stops at an error is ended
+    Do {
+        /// Seconds to wait (default: trace32.operation_timeout)
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<u64>,
+        /// The script: a path relative to the current directory, or "~~/..." in TRACE32
+        script: String,
+        /// Arguments for the script
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        arguments: Vec<String>,
+    },
     /// [S] Execute any PRACTICE command (can do anything, including reset and flash)
     Cmd {
         #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true)]
@@ -157,15 +171,25 @@ impl DebugCommand {
             DebugCommand::Clock { .. } => "clock",
             DebugCommand::Watch { .. } => "watch",
             DebugCommand::Attach => "attach",
+            DebugCommand::Reset => "reset",
             DebugCommand::Down => "down",
             DebugCommand::Break => "break",
             DebugCommand::Go => "go",
+            DebugCommand::Do { .. } => "do",
             DebugCommand::Cmd { .. } => "cmd",
             DebugCommand::Reconnect => "reconnect",
             DebugCommand::Help { .. } => "help",
             DebugCommand::Quit => "quit",
         }
     }
+}
+
+/// Whether the ELF at `path` has a DWARF line table (`.debug_line`); `None`
+/// when it cannot be read as an ELF file.
+pub fn has_line_table(path: &Path) -> Option<bool> {
+    let bytes = std::fs::read(path).ok()?;
+    let names = elf::section_names(&bytes).ok()?;
+    Some(names.iter().any(|name| name == ".debug_line"))
 }
 
 /// The result of a command: human text, the JSON document and the exit code.
@@ -192,7 +216,7 @@ pub fn split_trailing_json(mut args: Vec<String>) -> (Vec<String>, bool) {
     let takes_rest = args
         .iter()
         .find(|arg| !arg.starts_with('-'))
-        .is_some_and(|name| name == "eval" || name == "cmd");
+        .is_some_and(|name| name == "eval" || name == "cmd" || name == "do");
     let mut json = false;
     if takes_rest {
         while args.len() > 2 && args.last().is_some_and(|arg| arg == "--json") {
@@ -256,9 +280,20 @@ pub fn execute(ctx: &mut Context, command: &DebugCommand) -> DResult<Outcome> {
         }
         DebugCommand::Watch { items } => commands::watch(ctx, items),
         DebugCommand::Attach => commands::attach(ctx),
+        DebugCommand::Reset => commands::reset(ctx),
         DebugCommand::Down => commands::command(ctx, "SYStem.Down", "SYStem.Down done"),
         DebugCommand::Break => commands::command(ctx, "Break", "halted"),
         DebugCommand::Go => commands::command(ctx, "Go", "running"),
+        DebugCommand::Do {
+            timeout,
+            script,
+            arguments,
+        } => commands::run_script(
+            ctx,
+            script,
+            arguments,
+            Duration::from_secs(timeout.unwrap_or(ctx.config.operation_timeout)),
+        ),
         DebugCommand::Cmd { command } => {
             commands::command(ctx, &command.join(" "), "command executed")
         }
@@ -312,7 +347,7 @@ pub fn connect(config: &Config) -> DResult<Debugger> {
     if !powerview::port_open(config.rcl_port) {
         return Err(DebugError::new(format!(
             "no PowerView on RCL port {}; start it with 'tracebridge open' \
-             ('debug' never starts PowerView or resets the target)",
+             ('debug' never starts PowerView)",
             config.rcl_port
         )));
     }

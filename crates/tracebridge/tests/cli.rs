@@ -188,6 +188,25 @@ fn config_warns_when_other_hosts_may_use_the_remote_api() {
 }
 
 #[test]
+fn config_warns_about_an_elf_without_line_table() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("trace32.toml"),
+        "[project]\nprogram = \"app\"\nelf = \"app.elf\"\n",
+    )
+    .unwrap();
+    // An ELF32 header without section headers: no .debug_line.
+    let mut elf = vec![0u8; 52];
+    elf[..7].copy_from_slice(b"\x7fELF\x01\x01\x01");
+    std::fs::write(dir.path().join("app.elf"), elf).unwrap();
+    let text = stdout(&tracebridge(dir.path(), &["config"]));
+    assert!(
+        text.contains("app.elf has no line table (.debug_line)"),
+        "{text}"
+    );
+}
+
+#[test]
 fn init_refuses_to_overwrite() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("trace32.toml"), "x").unwrap();

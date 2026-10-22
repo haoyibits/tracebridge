@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(complete(&names, "st", 2), (0, strings(&["status"])));
         assert_eq!(
             complete(&names, "help re", 7),
-            (5, strings(&["reconnect", "reg"]))
+            (5, strings(&["reconnect", "reg", "reset"]))
         );
         assert_eq!(complete(&names, "reg HS", 6), (6, Vec::new()));
     }

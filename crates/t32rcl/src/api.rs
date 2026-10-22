@@ -13,6 +13,8 @@ pub(crate) const RAPI_CMD_DEVICE_SPECIFIC: u8 = 0x74;
 pub(crate) const EXECUTE_COMMAND: u8 = 0x04;
 /// `t32_executefunction`: EXECUTE_PRACTICE sub-command.
 pub(crate) const EXECUTE_FUNCTION: u8 = 0x05;
+/// `t32_getpracticestate`: EXECUTE_PRACTICE sub-command (`opt_arg=0x03`).
+pub(crate) const GET_PRACTICE_STATE: u8 = 0x03;
 pub(crate) const RAPI_DSCMD_MEMORY_OBJ_READ: u8 = 0x35;
 pub(crate) const RAPI_DSCMD_MEMORY_OBJ_WRITE: u8 = 0x36;
 pub(crate) const RAPI_DSCMD_SYMBOL_QUERYOBJ: u8 = 0x68;
@@ -134,6 +136,10 @@ mod tests {
         assert_eq!(
             frame(RAPI_CMD_ATTACH, 1, 1, &[], None),
             hex("04 00 00 00 10 00 00 00 02 71 01 01 00 00 00 00")
+        );
+        assert_eq!(
+            frame(RAPI_CMD_EXECUTE_PRACTICE, GET_PRACTICE_STATE, 1, &[], None),
+            hex("04 00 00 00 10 00 00 00 02 72 03 01 00 00 00 00")
         );
         assert_eq!(
             frame(

@@ -9,12 +9,18 @@
 //! read = { reg = "HSCTLR" }        # or addr / core / expr
 //! expect = { eq = 0x30C5083A }     # eq/ne (+ mask), nonzero, range, in_symbol, one_of
 //! variants = ["default"]           # optional
+//!
+//! [[check]]
+//! name = "core clock"
+//! read = { clock = "CLUSTER0_CORE0" }  # a clock of `debug clock`'s tree
+//! expect = { hz = 400_000_000, source = "SYS_CLK_CGM0" }  # any of state, hz, source, warnings
 //! ```
 
 use std::path::Path;
 
 use toml::{Table, Value};
 
+use super::clock;
 use super::probe::{
     self, DResult, DebugError, PerRegister, PerSnapshot, Probe, TargetAddress, hex32,
 };
@@ -45,6 +51,8 @@ pub enum ReadSpec {
     Core(String),
     /// Any PRACTICE expression.
     Expr(String),
+    /// A clock of the clock tree description (`debug clock`).
+    Clock(String),
 }
 
 /// A number, or a symbol address plus an offset (`"sym:<name>[+off]"`).
@@ -56,12 +64,129 @@ pub enum Operand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expect {
-    Eq { value: Operand, mask: Option<u64> },
-    Ne { value: Operand, mask: Option<u64> },
+    Eq {
+        value: Operand,
+        mask: Option<u64>,
+    },
+    Ne {
+        value: Operand,
+        mask: Option<u64>,
+    },
     NonZero,
     Range(u64, u64),
     InSymbol(String),
     OneOf(Vec<Operand>),
+    /// The expectations of a `read.clock` check.
+    Clock(ClockExpect),
+}
+
+/// A frequency in Hz. Never NaN (checked when parsed), so `Eq` holds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hz(pub f64);
+
+impl Eq for Hz {}
+
+/// What a `read.clock` check expects; every part is optional, at least one
+/// is given. The same judgement as `debug clock`'s JSON gives: `hz` within
+/// half a hertz (and so "on"), `source` the clock it runs from, `warnings`
+/// the exact set.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClockExpect {
+    /// `state = "on"` (true) or `"off"` (false).
+    pub on: Option<bool>,
+    pub hz: Option<Hz>,
+    pub source: Option<String>,
+    pub warnings: Option<Vec<String>>,
+}
+
+impl ClockExpect {
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        match (self.hz, self.on) {
+            (Some(Hz(hz)), _) => parts.push(clock::format_frequency(hz)),
+            (None, Some(true)) => parts.push("on".to_string()),
+            (None, Some(false)) => parts.push("off".to_string()),
+            (None, None) => {}
+        }
+        if let Some(source) = &self.source {
+            parts.push(format!("from {source}"));
+        }
+        match &self.warnings {
+            Some(warnings) if warnings.is_empty() => parts.push("no warnings".to_string()),
+            Some(warnings) => parts.push(format!("warnings [{}]", warnings.join(", "))),
+            None => {}
+        }
+        parts.join(", ")
+    }
+
+    /// What does not match `clock`; empty when it holds.
+    fn mismatches(&self, clock: &clock::Evaluated) -> Vec<String> {
+        let (state, hz) = clock_state(clock);
+        let mut found = Vec::new();
+        let want_on = if self.hz.is_some() {
+            Some(true)
+        } else {
+            self.on
+        };
+        if let Some(on) = want_on {
+            let want = if on { "on" } else { "off" };
+            if state != want {
+                found.push(format!("state {state}, expected {want}"));
+            }
+        }
+        if let Some(Hz(expected)) = self.hz {
+            if hz.is_none_or(|hz| (hz - expected).abs() > 0.5) {
+                found.push(format!("expected {}", clock::format_frequency(expected)));
+            }
+        }
+        if let Some(source) = &self.source {
+            if clock.parent.as_deref() != Some(source.as_str()) {
+                found.push(format!("expected from {source}"));
+            }
+        }
+        if let Some(warnings) = &self.warnings {
+            let mut expected = warnings.clone();
+            let mut actual = clock.warnings.clone();
+            expected.sort();
+            actual.sort();
+            if expected != actual {
+                found.push(format!("expected warnings [{}]", warnings.join(", ")));
+            }
+        }
+        found
+    }
+}
+
+/// The state word and frequency of an evaluated clock.
+fn clock_state(clock: &clock::Evaluated) -> (&'static str, Option<f64>) {
+    match &clock.state {
+        clock::State::Hz(hz) => ("on", Some(*hz)),
+        clock::State::Off(_) => ("off", None),
+        clock::State::Unknown(_) => ("unknown", None),
+        clock::State::Error(_) => ("error", None),
+    }
+}
+
+/// An evaluated clock as text: `on 400 MHz from PLL1_D0_PHI_HP ! not locked`.
+fn describe_clock(clock: &clock::Evaluated) -> String {
+    let (state, hz) = clock_state(clock);
+    let mut parts = vec![state.to_string()];
+    if let Some(hz) = hz {
+        parts.push(clock::format_frequency(hz));
+    }
+    if let Some(parent) = &clock.parent {
+        parts.push(format!("from {parent}"));
+    }
+    if !clock.warnings.is_empty() {
+        parts.push(format!("! {}", clock.warnings.join(", ")));
+    }
+    match &clock.state {
+        clock::State::Off(reason) | clock::State::Unknown(reason) => {
+            parts.push(format!("({reason})"))
+        }
+        _ => {}
+    }
+    parts.join(" ")
 }
 
 impl Check {
@@ -146,6 +271,9 @@ fn parse_check(table: &Table) -> DResult<Check> {
         None => return Err(DebugError::new("read is missing")),
     };
     let expect = match table.get("expect") {
+        Some(Value::Table(expect)) if matches!(read, ReadSpec::Clock(_)) => {
+            Expect::Clock(parse_clock_expect(expect)?)
+        }
         Some(Value::Table(expect)) => parse_expect(expect)?,
         Some(_) => return Err(DebugError::new("expect must be a table")),
         None => return Err(DebugError::new("expect is missing")),
@@ -172,7 +300,8 @@ fn parse_check(table: &Table) -> DResult<Check> {
 }
 
 fn parse_read(table: &Table) -> DResult<ReadSpec> {
-    let exactly_one = || DebugError::new("read must have exactly one of reg, addr, core, expr");
+    let exactly_one =
+        || DebugError::new("read must have exactly one of reg, addr, core, expr, clock");
     if table.len() != 1 {
         return Err(exactly_one());
     }
@@ -192,6 +321,7 @@ fn parse_read(table: &Table) -> DResult<ReadSpec> {
         })?),
         "core" => ReadSpec::Core(text.clone()),
         "expr" => ReadSpec::Expr(text.clone()),
+        "clock" => ReadSpec::Clock(text.trim().to_string()),
         _ => return Err(exactly_one()),
     })
 }
@@ -256,8 +386,69 @@ fn parse_mask(table: &Table) -> DResult<Option<u64>> {
     }
 }
 
+const CLOCK_FORMS: &str = "state, hz, source, warnings";
+
+fn parse_clock_expect(table: &Table) -> DResult<ClockExpect> {
+    let mut expect = ClockExpect::default();
+    if table.is_empty() {
+        return Err(DebugError::new(format!(
+            "expect must have at least one of {CLOCK_FORMS} for read.clock"
+        )));
+    }
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("state", Value::String(state)) if state == "on" || state == "off" => {
+                expect.on = Some(state == "on");
+            }
+            ("state", _) => return Err(DebugError::new("expect.state must be \"on\" or \"off\"")),
+            ("hz", Value::Integer(hz)) if *hz >= 0 => expect.hz = Some(Hz(*hz as f64)),
+            ("hz", Value::Float(hz)) if hz.is_finite() && *hz >= 0.0 => expect.hz = Some(Hz(*hz)),
+            ("hz", _) => return Err(DebugError::new("expect.hz must be a frequency in Hz")),
+            ("source", Value::String(source)) if !source.trim().is_empty() => {
+                expect.source = Some(source.trim().to_string());
+            }
+            ("source", _) => return Err(DebugError::new("expect.source must be a clock name")),
+            ("warnings", Value::Array(items)) => {
+                expect.warnings = Some(
+                    items
+                        .iter()
+                        .map(|item| match item {
+                            Value::String(text) => Ok(text.clone()),
+                            _ => Err(DebugError::new(
+                                "expect.warnings must be an array of strings",
+                            )),
+                        })
+                        .collect::<DResult<Vec<_>>>()?,
+                );
+            }
+            ("warnings", _) => {
+                return Err(DebugError::new(
+                    "expect.warnings must be an array of strings",
+                ));
+            }
+            (other, _) => {
+                return Err(DebugError::new(format!(
+                    "unknown expectation '{other}' for read.clock (expected {CLOCK_FORMS})"
+                )));
+            }
+        }
+    }
+    if expect.hz.is_some() && expect.on == Some(false) {
+        return Err(DebugError::new("expect.hz with state \"off\""));
+    }
+    Ok(expect)
+}
+
 fn parse_expect(table: &Table) -> DResult<Expect> {
     const FORMS: &str = "eq, ne, nonzero, range, in_symbol, one_of";
+    if let Some(key) = table
+        .keys()
+        .find(|key| matches!(key.as_str(), "state" | "hz" | "source" | "warnings"))
+    {
+        return Err(DebugError::new(format!(
+            "expect.{key} only works with read.clock"
+        )));
+    }
     let forms: Vec<&String> = table.keys().filter(|key| key.as_str() != "mask").collect();
     if forms.len() != 1 {
         return Err(DebugError::new(format!(
@@ -354,6 +545,8 @@ pub struct CheckResult {
     /// What was (or would be) read, e.g. `reg .HSCTLR (C15:0x4001)`.
     pub read: String,
     pub value: Option<u64>,
+    /// The value as text, for reads that are not a number (`read.clock`).
+    pub text: Option<String>,
     /// The expectation with symbols resolved.
     pub expect: String,
     pub error: Option<String>,
@@ -426,10 +619,11 @@ impl Report {
                 Status::Pass => style.good(status),
                 Status::Fail | Status::Error => style.bad(status),
             };
-            let value = match result.value {
-                Some(value) => style.value(format!("{:<10}", hex32(value))),
-                None if self.dry_run => format!("{:<10}", result.read),
-                None => style.dim(format!("{:<10}", "-")),
+            let value = match (&result.text, result.value) {
+                (Some(text), _) => style.value(format!("{text:<10}")),
+                (None, Some(value)) => style.value(format!("{:<10}", hex32(value))),
+                (None, None) if self.dry_run => format!("{:<10}", result.read),
+                (None, None) => style.dim(format!("{:<10}", "-")),
             };
             let mut line = format!(
                 "  {status} {}  {value}  {}",
@@ -459,7 +653,8 @@ impl Report {
                     "status": r.status.label().to_ascii_lowercase(),
                     "read": r.read,
                     "value": r.value,
-                    "hex": r.value.map(hex32),
+                    "hex": if r.text.is_some() { None } else { r.value.map(hex32) },
+                    "text": r.text,
                     "expect": r.expect,
                     "error": r.error,
                 })
@@ -490,6 +685,8 @@ enum Resolved {
     NonZero,
     Range(u64, u64),
     OneOf(Vec<u64>),
+    /// Judged against the evaluated clock tree, not a number.
+    Clock(ClockExpect),
 }
 
 impl Resolved {
@@ -500,6 +697,7 @@ impl Resolved {
             Resolved::NonZero => value != 0,
             Resolved::Range(low, high) => (*low..=*high).contains(&value),
             Resolved::OneOf(values) => values.contains(&value),
+            Resolved::Clock(_) => false,
         }
     }
 }
@@ -572,6 +770,7 @@ fn resolve_expect(probe: &mut dyn Probe, expect: &Expect) -> DResult<(Resolved, 
                 format!("one of [{}]", texts.join(", ")),
             )
         }
+        Expect::Clock(expect) => (Resolved::Clock(expect.clone()), expect.describe()),
     })
 }
 
@@ -594,7 +793,7 @@ impl Prepared<'_> {
                 .is_some_and(|r| r.address.is_coprocessor()),
             ReadSpec::Addr(address) => address.is_coprocessor(),
             ReadSpec::Core(_) => true,
-            ReadSpec::Expr(_) => false,
+            ReadSpec::Expr(_) | ReadSpec::Clock(_) => false,
         }
     }
 }
@@ -607,11 +806,28 @@ fn per_check<T>(result: DResult<T>) -> DResult<Result<T, DebugError>> {
     }
 }
 
+/// The clock tree for `read.clock` checks: its description and the board's
+/// frequencies (`[clock]` in trace32.toml).
+pub struct Clocks<'a> {
+    pub tree: &'a clock::Tree,
+    pub inputs: &'a [(String, f64)],
+}
+
+impl CheckFile {
+    /// Whether a check selected for `variant` reads a clock.
+    pub fn reads_clocks(&self, variant: Option<&str>) -> bool {
+        self.checks
+            .iter()
+            .any(|check| check.selected(variant) && matches!(check.read, ReadSpec::Clock(_)))
+    }
+}
+
 pub fn run(
     probe: &mut dyn Probe,
     per: &mut PerSnapshot,
     file: &CheckFile,
     options: &Options,
+    clocks: Option<&Clocks>,
 ) -> DResult<Report> {
     let selected: Vec<&Check> = file
         .checks
@@ -651,6 +867,21 @@ pub fn run(
             ReadSpec::Addr(address) => item.read = format!("addr {address}"),
             ReadSpec::Core(name) => item.read = format!("core {name}"),
             ReadSpec::Expr(expression) => item.read = format!("expr {expression}"),
+            ReadSpec::Clock(name) => {
+                item.read = format!("clock {name}");
+                match clocks {
+                    None => {
+                        item.error =
+                            Some(DebugError::new("read.clock needs a clock tree description"));
+                    }
+                    Some(clocks) if !clocks.tree.clocks.iter().any(|c| c.name == *name) => {
+                        item.error = Some(DebugError::new(format!(
+                            "clock {name} is not in the clock tree description"
+                        )));
+                    }
+                    Some(_) => {}
+                }
+            }
         }
         match per_check(resolve_expect(probe, &check.expect))? {
             Ok(expect) => item.expect = Some(expect),
@@ -686,6 +917,20 @@ pub fn run(
         }
     }
 
+    // The clock tree is evaluated once, from memory-mapped registers, after
+    // the core is stopped (when --halt stops it).
+    let wants_clocks = prepared
+        .iter()
+        .any(|item| item.error.is_none() && matches!(item.check.read, ReadSpec::Clock(_)));
+    let clock_report = match clocks {
+        Some(clocks) if wants_clocks && !options.dry_run => Some(per_check(clock::evaluate(
+            probe,
+            clocks.tree,
+            clocks.inputs,
+        ))?),
+        _ => None,
+    };
+
     let mut results = Vec::new();
     for item in prepared {
         let expect_text = item
@@ -698,6 +943,7 @@ pub fn run(
             status: Status::Error,
             read: item.read.clone(),
             value: None,
+            text: None,
             expect: expect_text,
             error: None,
         };
@@ -708,6 +954,13 @@ pub fn run(
         }
         if options.dry_run {
             result.status = Status::Pass;
+            results.push(result);
+            continue;
+        }
+        if let (ReadSpec::Clock(name), Some(Expect::Clock(expect))) =
+            (&item.check.read, Some(&item.check.expect))
+        {
+            judge_clock(&mut result, name, expect, clock_report.as_ref());
             results.push(result);
             continue;
         }
@@ -737,12 +990,50 @@ pub fn run(
     })
 }
 
+/// Fill in the result of a `read.clock` check from the evaluated tree.
+fn judge_clock(
+    result: &mut CheckResult,
+    name: &str,
+    expect: &ClockExpect,
+    report: Option<&Result<clock::Report, DebugError>>,
+) {
+    let clock = match report {
+        Some(Ok(report)) => report.clocks.iter().find(|clock| clock.name == name),
+        Some(Err(error)) => {
+            result.error = Some(format!(
+                "the clock tree could not be read: {}",
+                error.message
+            ));
+            return;
+        }
+        None => None,
+    };
+    let Some(clock) = clock else {
+        result.error = Some(format!("clock {name} was not evaluated"));
+        return;
+    };
+    result.text = Some(describe_clock(clock));
+    if let clock::State::Error(reason) = &clock.state {
+        result.error = Some(reason.clone());
+        return;
+    }
+    if let clock::State::Hz(hz) = clock.state {
+        result.value = Some(hz.round() as u64);
+    }
+    result.status = if expect.mismatches(clock).is_empty() {
+        Status::Pass
+    } else {
+        Status::Fail
+    };
+}
+
 fn read_value(probe: &mut dyn Probe, item: &Prepared) -> DResult<u64> {
     match &item.check.read {
         ReadSpec::Reg(_) => probe::read_register(probe, item.register.as_ref().unwrap()),
         ReadSpec::Addr(address) => probe::read_long(probe, address),
         ReadSpec::Core(name) => probe::eval_u64(probe, &format!("Register({name})")),
         ReadSpec::Expr(expression) => probe::eval_u64(probe, expression),
+        ReadSpec::Clock(_) => unreachable!("clock checks are judged by judge_clock"),
     }
 }
 
@@ -763,6 +1054,7 @@ fn describe_expect(expect: &Expect) -> String {
             "one of [{}]",
             values.iter().map(operand).collect::<Vec<_>>().join(", ")
         ),
+        Expect::Clock(expect) => expect.describe(),
     }
 }
 
@@ -877,7 +1169,7 @@ mod tests {
             error(
                 "[[check]]\nname = \"a\"\nread = { reg = \"X\", core = \"PC\" }\nexpect = { nonzero = true }"
             ),
-            "check #1 (a): read must have exactly one of reg, addr, core, expr"
+            "check #1 (a): read must have exactly one of reg, addr, core, expr, clock"
         );
         assert_eq!(
             error(
@@ -957,6 +1249,7 @@ mod tests {
                 variant: Some("b".into()),
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         assert_eq!(report.results.len(), 2);
@@ -1005,6 +1298,7 @@ mod tests {
             &mut PerSnapshot::default(),
             &file(MIXED),
             &Options::default(),
+            None,
         )
         .unwrap();
         assert!(report.passed(), "{report:#?}");
@@ -1026,6 +1320,7 @@ mod tests {
             &mut PerSnapshot::default(),
             &file(MIXED),
             &Options::default(),
+            None,
         )
         .unwrap();
         assert_eq!(report.results[2].status, Status::Fail);
@@ -1051,6 +1346,7 @@ mod tests {
             &mut PerSnapshot::default(),
             &file(MIXED),
             &Options::default(),
+            None,
         )
         .unwrap();
         assert_eq!(report.results[2].status, Status::Error);
@@ -1073,6 +1369,7 @@ mod tests {
             &mut PerSnapshot::default(),
             &file(MIXED),
             &Options::default(),
+            None,
         )
         .unwrap_err();
         assert_eq!(
@@ -1095,6 +1392,7 @@ mod tests {
                 halt: true,
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         assert!(report.halted);
@@ -1121,6 +1419,7 @@ mod tests {
             &mut PerSnapshot::default(),
             &file,
             &Options::default(),
+            None,
         )
         .unwrap();
         assert!(report.passed());
@@ -1138,6 +1437,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         assert!(report.passed());
@@ -1158,6 +1458,179 @@ mod tests {
             report
                 .summary()
                 .starts_with("dry run: 3 resolved, 0 errors")
+        );
+    }
+
+    /// OSC (board input) and IRC (16 MHz) feed PLL through SEL[0]; PLL runs
+    /// at 4 x its source, CORE from PLL with a warning while LOCK[0] is 0.
+    const CLOCK_TREE: &str = r#"
+        chips = ["DEMO"]
+        [reg]
+        SEL = "AD:0x100"
+        LOCK = "AD:0x104"
+        [[clock]]
+        name = "OSC"
+        [[clock]]
+        name = "IRC"
+        hz = "16MHz"
+        [[clock]]
+        name = "PLL"
+        select = "SEL[0]"
+        sources = { "0" = "IRC", "1" = "OSC" }
+        mul = "4"
+        [[clock]]
+        name = "CORE"
+        from = "PLL"
+        warn = [{ when = "LOCK[0] == 0", text = "not locked" }]
+        [[clock]]
+        name = "OFF"
+        from = "IRC"
+        enable = "0"
+    "#;
+
+    const CLOCK_CHECKS: &str = r#"
+        [[check]]
+        name = "pll"
+        read = { clock = "PLL" }
+        expect = { hz = 40_000_000, source = "OSC" }
+        [[check]]
+        name = "core"
+        read = { clock = "CORE" }
+        expect = { state = "on", warnings = [] }
+        [[check]]
+        name = "off"
+        read = { clock = "OFF" }
+        expect = { state = "off" }
+        [[check]]
+        name = "pll from irc"
+        read = { clock = "PLL" }
+        expect = { source = "IRC" }
+        [[check]]
+        name = "ctrl"
+        read = { addr = "AD:0x100" }
+        expect = { eq = 1 }
+    "#;
+
+    #[test]
+    fn clock_checks_parse_and_reject_mixed_forms() {
+        let parsed = file(CLOCK_CHECKS);
+        assert_eq!(parsed.checks[0].read, ReadSpec::Clock("PLL".into()));
+        assert_eq!(
+            parsed.checks[0].expect,
+            Expect::Clock(ClockExpect {
+                hz: Some(Hz(40e6)),
+                source: Some("OSC".into()),
+                ..Default::default()
+            })
+        );
+        assert!(parsed.reads_clocks(None));
+        let error = |text: &str| parse(text).unwrap_err().message;
+        let check = |read: &str, expect: &str| {
+            format!("[[check]]\nname = \"x\"\nread = {read}\nexpect = {expect}\n")
+        };
+        assert!(
+            error(&check(r#"{ clock = "PLL" }"#, "{ eq = 1 }")).ends_with(
+                "unknown expectation 'eq' for read.clock (expected state, hz, source, warnings)"
+            )
+        );
+        assert!(
+            error(&check(r#"{ addr = "AD:0x0" }"#, "{ hz = 1 }"))
+                .ends_with("expect.hz only works with read.clock")
+        );
+        assert!(error(&check(r#"{ clock = "PLL" }"#, "{}")).ends_with(
+            "expect must have at least one of state, hz, source, warnings for read.clock"
+        ));
+        assert!(
+            error(&check(
+                r#"{ clock = "PLL" }"#,
+                r#"{ state = "off", hz = 1 }"#
+            ))
+            .ends_with("expect.hz with state \"off\"")
+        );
+        assert!(
+            error(&check(r#"{ clock = "PLL" }"#, r#"{ state = "maybe" }"#))
+                .ends_with("expect.state must be \"on\" or \"off\"")
+        );
+    }
+
+    #[test]
+    fn clock_checks_judge_the_evaluated_tree() {
+        let tree = clock::parse(CLOCK_TREE).unwrap();
+        let inputs = vec![("OSC".to_string(), 10e6)];
+        let clocks = Clocks {
+            tree: &tree,
+            inputs: &inputs,
+        };
+        let mut probe = FakeProbe::with(&[
+            ("Data.Long(AD:0x100)", Value::Int(1)),
+            ("Data.Long(AD:0x104)", Value::Int(0)),
+            ("STATE.RUN()", Value::Bool(true)),
+        ]);
+        let report = run(
+            &mut probe,
+            &mut PerSnapshot::default(),
+            &file(CLOCK_CHECKS),
+            &Options::default(),
+            Some(&clocks),
+        )
+        .unwrap();
+        let status: Vec<(&str, Status)> = report
+            .results
+            .iter()
+            .map(|r| (r.name.as_str(), r.status))
+            .collect();
+        assert_eq!(
+            status,
+            [
+                ("pll", Status::Pass),
+                ("core", Status::Fail),
+                ("off", Status::Pass),
+                ("pll from irc", Status::Fail),
+                ("ctrl", Status::Pass),
+            ]
+        );
+        assert_eq!(report.results[0].value, Some(40_000_000));
+        assert_eq!(
+            report.results[0].text.as_deref(),
+            Some("on 40 MHz from OSC")
+        );
+        assert_eq!(
+            report.results[1].text.as_deref(),
+            Some("on 40 MHz from PLL ! not locked")
+        );
+        assert_eq!(report.results[0].expect, "40 MHz, from OSC");
+        assert_eq!(report.results[1].expect, "on, no warnings");
+        let json = report.to_json();
+        assert_eq!(json["results"][0]["hex"], serde_json::Value::Null);
+        assert_eq!(json["results"][0]["text"], "on 40 MHz from OSC");
+        assert_eq!(json["results"][4]["hex"], "0x00000001");
+        // The tree is read once for all clock checks: one read per register.
+        let reads = probe
+            .log
+            .iter()
+            .filter(|line| line.as_str() == "fnc Data.Long(AD:0x100)")
+            .count();
+        assert_eq!(reads, 2, "{:?}", probe.log); // tree + the addr check
+        let text = report.human(Style::PLAIN);
+        assert!(
+            text.contains("FAIL  core          on 40 MHz from PLL ! not locked  on, no warnings"),
+            "{text}"
+        );
+
+        let unknown = file(
+            "[[check]]\nname = \"x\"\nread = { clock = \"NOPE\" }\nexpect = { state = \"on\" }\n",
+        );
+        let report = run(
+            &mut probe,
+            &mut PerSnapshot::default(),
+            &unknown,
+            &Options::default(),
+            Some(&clocks),
+        )
+        .unwrap();
+        assert_eq!(
+            report.results[0].error.as_deref(),
+            Some("clock NOPE is not in the clock tree description")
         );
     }
 }

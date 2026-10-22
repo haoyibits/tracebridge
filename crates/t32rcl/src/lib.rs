@@ -146,6 +146,25 @@ impl Debugger {
         Ok(())
     }
 
+    /// `Library.t32_getpracticestate` (`T32_GetPracticeState`): 0 when no
+    /// PRACTICE script runs, 1 while one runs, 2 while one waits in a dialog.
+    /// A script that stopped at an error or at `STOP` stays on the PRACTICE
+    /// stack but does not run (0). The answer is a little-endian integer.
+    pub fn practice_state(&mut self) -> Result<u64> {
+        let answer = self.call(
+            api::RAPI_CMD_EXECUTE_PRACTICE,
+            api::GET_PRACTICE_STATE,
+            &[],
+            None,
+        )?;
+        answer.iter().rev().try_fold(0u64, |value, byte| {
+            value
+                .checked_mul(256)
+                .map(|value| value + u64::from(*byte))
+                .ok_or_else(|| Error::Protocol("PRACTICE state out of range".into()))
+        })
+    }
+
     /// `Debugger.print`: `ECHO "<text>"` in the PowerView message line and AREA.
     pub fn print(&mut self, text: &str) -> Result<()> {
         self.cmd(&format!("ECHO \"{text}\""))

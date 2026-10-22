@@ -16,7 +16,7 @@ your project except a `trace32.toml`.
 | `tracebridge rtt` | Bidirectional SEGGER RTT terminal (Ctrl-C to quit) |
 | `tracebridge vscode` | Add the `TRACE32: Attach` debug configuration to `.vscode/` |
 | `tracebridge rustrover` | Add the `TRACE32: Attach` run configuration to `.run/` |
-| `tracebridge debug` | Inspect registers, memory, faults and the flashed image without resetting the target |
+| `tracebridge debug` | Inspect registers, memory, faults and the flashed image; only `debug reset` resets the target |
 | `tracebridge chips <name>` | Show which flash script `flash` would use for a chip |
 | `tracebridge adapter` | DAP proxy in front of `t32debugadapter`; the IDE starts it |
 | `tracebridge skill` | Install the AI agent skill that splits the work with Lauterbach's t32mcp |
@@ -99,7 +99,7 @@ Day to day:
 3. Debug from the IDE (below), or use PowerView directly.
 4. `tracebridge rtt` for the target's RTT console.
 5. `tracebridge debug` to check registers, memory, faults and whether the
-   board runs the ELF you built, without resetting it.
+   board runs the ELF you built; only `debug reset` resets the target.
 
 ## Configuration
 
@@ -304,9 +304,10 @@ restores its settings on exit.
 ## Inspecting the target: `tracebridge debug`
 
 `tracebridge debug` reads registers, memory and fault state through the
-PowerView that is already running, over the Remote API. It **never resets the
-target**: connecting issues no `SYStem.Up`, `SYStem.Mode Go` or reset, and it
-does not start PowerView (run `tracebridge open`, `flash` or `load` first).
+PowerView that is already running, over the Remote API. **Only `debug reset`
+resets the target**: connecting and every other command issue no
+`SYStem.Up`, `SYStem.Mode Go` or reset, and `debug` does not start PowerView
+(run `tracebridge open`, `flash` or `load` first).
 
 ### Two ways to use it
 
@@ -381,7 +382,7 @@ t32 [up, halted]> go
 | `status` | R | Debugger mode, run state, power, CPU; when halted, PC with symbol+offset and the decoded CPSR |
 | `reg <name\|address>…` | R | Registers by PER-file name (`HSR`), field (`HSCTLR.C`, also prints the BITFLD choice), full PER path, or raw address (`C15:0x4025`, `AD:0x40000000`) |
 | `mem <address\|symbol> [count]` | R | `count` 32-bit words (default 1) as a hex dump |
-| `fault` | R | AArch32 Hyp fault report: vector slot (also when PC is in a table other than the one HVBAR points at), HSR decoded, HDFAR or HIFAR, ELR_hyp with symbol, SPSR_hyp |
+| `fault` | R | AArch32 Hyp fault report: vector slot (also when PC is in a table other than the one HVBAR points at), HSR decoded, HDFAR or HIFAR, ELR_hyp with symbol, SPSR_hyp. Halted outside Hyp mode, the Hyp registers are read with `HC15:` (see below) |
 | `eval <expression>` | R | The value of any PRACTICE expression |
 | `verify [elf] [--t32]` | R | Does target memory hold the ELF's loadable content? |
 | `check <file> [--variant V] [--dry-run]` | R | Data-driven acceptance check (below) |
@@ -389,13 +390,24 @@ t32 [up, halted]> go
 | `clock [CLOCK=FREQUENCY…] [--tree FILE] [--html]` | R | The clock tree with frequencies, computed from the clock registers (below); `--html` also writes it as a diagram |
 | `watch <file\|name…>` | UI | A PER.Watch window with exactly these registers (PowerView build 176763, 09/2025, or newer) |
 | `attach` | S | `SYStem.Mode Attach`: no reset; the core keeps running or stays halted. PowerView then reports mode "up" |
+| `reset` | S | Reset the chip through the debugger and halt at the reset vector: `SYStem.Down`, `SYStem.RESet`, then `SYStem.CPU`, `SYStem.MemAccess`, `CORE.ASSIGN` from `trace32.toml`, `SYStem.Mode Up` and `SYStem.JtagClock`. Refused while a PRACTICE script is active |
 | `down` | S | `SYStem.Down` |
 | `break`, `go` | S | Halt or resume the core |
+| `do [--timeout S] <script> [args…]` | S | Runs a PRACTICE script with `DO` and waits until it ends (`cmd "DO …"` returns as soon as the script starts). A script that stops at an error is ended (`END`) and the error reported; one that waits in a dialog or at `STOP` is left for you. Refused while another script is active |
 | `cmd <PRACTICE command>` | S | Runs **any** command, including reset and flash |
 | `help [command]`, `reconnect`, `quit` | | Session commands |
 
-There is no `up`, `reset` or `flash` in the session; use the top-level
-commands for those.
+There is no `up` or `flash` in the session; use the top-level `flash` and
+`load` for those.
+
+**Hyp registers while a Guest is halted.** TRACE32 reads a `C15:` register by
+executing the MRC at the core's current exception level, so a Hyp register
+(op1 = 4, e.g. HCR `C15:0x4011`) gives a bus error while the core is halted
+in EL1. tracebridge then reads it again with `HC15:`, which the Arm debugger
+manual documents for exactly this ("independent of the current core mode",
+named for Cortex-A7/A15). Whether it works on the Cortex-R52 is not confirmed
+yet; when it does not, the original error is reported and `fault` names the
+mode the core is halted in.
 
 ### How values are read
 
@@ -490,7 +502,18 @@ name = "system control"
 read = { reg = "SCTRL" }                 # or addr = "AD:0x...", core = "PC", expr = "..."
 expect = { eq = 0x00C50078 }             # eq/ne (+ mask), nonzero, range, in_symbol, one_of
 variants = ["debug"]                     # optional: only with --variant debug
+
+[[check]]
+name = "core clock"
+read = { clock = "CORE" }                # a clock of the `debug clock` tree
+expect = { hz = 400_000_000, source = "PLL", warnings = [] }  # any of state, hz, source, warnings
 ```
+
+A `read.clock` check judges the clock tree that `debug clock` computes (the
+same description and `[clock]` frequencies): `state` is `"on"` or `"off"`,
+`hz` must match within half a hertz (and implies "on"), `source` is the
+clock it runs from, `warnings` the exact list (e.g. `"not locked"`). The tree
+is read once per run, from memory-mapped registers only.
 
 `eq`, `ne` and `one_of` accept `"sym:<name>[+offset]"` in place of a number.
 The output is one line per check and a summary. `--dry-run` resolves every
@@ -594,7 +617,7 @@ agents. Both tools talk to the same PowerView over the same Remote API port:
 | Work | Tool |
 |---|---|
 | Halt, run, step, core registers, memory, breakpoints, source, stack, symbols, any PRACTICE command | t32mcp with `lauterbach-trace32-debug-basic` |
-| Start PowerView, flash, load, RTT, which flash script a chip uses | `tracebridge open`, `flash`, `load`, `rtt`, `chips` |
+| Start PowerView, flash, load, reset to the reset vector, RTT, which flash script a chip uses | `tracebridge open`, `flash`, `load`, `debug reset`, `rtt`, `chips` |
 | Register by PER name, Hyp fault, target memory against the ELF, check files, clock tree | `tracebridge debug reg`, `fault`, `verify`, `check`, `clock` |
 
 The generic `debug` commands (`status`, `mem`, `eval`, `cmd`, `break`, `go`,
@@ -655,7 +678,8 @@ asking. In the project's `.claude/settings.json`:
 `check` is allowed with **exact** command lines rather than a `:*` prefix: a
 prefix rule would also allow `check … --halt`, which stops the core.
 Everything else (`flash`, `load`, `open`, `rtt`, the `debug` commands
-`attach`, `down`, `break`, `go`, `cmd`, `check --halt`) still asks. For these
+`attach`, `reset`, `down`, `break`, `go`, `do`, `cmd`, `check --halt`) still
+asks. For these
 rules to match, run the commands inside the project (no `--config` before
 `debug`) and put `--json` after the command's arguments.
 
@@ -697,6 +721,11 @@ and Ctrl-C in `rtt` exits with status 0.
   shows which PER file PowerView uses.
 - **Timeouts during flash**: raise `trace32.operation_timeout` and look at the
   PowerView AREA window.
+- **The List window shows only assembly**: the ELF has no DWARF line table.
+  `tracebridge config` warns about it. Build with debug info; for Rust, a
+  release build has none unless the profile asks for it:
+  `[profile.release] debug = true` (it does not change the code that is
+  flashed, only the ELF).
 - **`PowerView is busy: a PRACTICE script is active`** (`flash`, `load`): a
   script runs, waits in a dialog or stopped at an error, e.g. one an agent
   started through t32mcp. Let it finish, or end it in PowerView (`END`), then

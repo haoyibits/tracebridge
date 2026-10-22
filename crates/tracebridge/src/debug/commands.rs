@@ -2,6 +2,7 @@
 //! or in the debugger; the others (S) are marked where they are defined.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use t32rcl::Value;
@@ -429,17 +430,34 @@ pub fn fault(ctx: &mut Context) -> DResult<Outcome> {
             "The fault registers (CP15, ELR_hyp, SPSR_hyp)",
         ));
     }
-    fn no_hyp(what: &'static str) -> impl Fn(DebugError) -> DebugError {
-        move |error| {
+    // The core's mode, for the error when the Hyp registers cannot be read:
+    // halted outside Hyp mode is the usual reason, not a core without it.
+    let mode = optional(probe.fnc("Register(CPSR)"))?
+        .as_ref()
+        .and_then(value_as_u64)
+        .map(|cpsr| decode::decode_psr(cpsr as u32));
+    let not_hyp = mode
+        .as_ref()
+        .filter(|psr| psr.mode != 0x1A)
+        .map(|psr| psr.mode_name.unwrap_or("an unknown").to_string());
+    let no_hyp = |what: &'static str| {
+        let not_hyp = not_hyp.clone();
+        move |error: DebugError| {
             if error.lost {
-                error
-            } else {
-                error.context(format!(
+                return error;
+            }
+            match &not_hyp {
+                Some(mode) => error.context(format!(
+                    "cannot read {what}: the core is halted in {mode} mode, not in Hyp mode, \
+                     and TRACE32 could not read it from there; stop the core in EL2, e.g. at \
+                     a breakpoint in the hypervisor"
+                )),
+                None => error.context(format!(
                     "cannot read {what}; fault needs an AArch32 core with Hyp mode"
-                ))
+                )),
             }
         }
-    }
+    };
     let cp15 = |text: &str| TargetAddress::parse(text).expect("constant address");
     let hsr_raw = read_long(probe, &cp15(HSR)).map_err(no_hyp("HSR (C15:0x4025)"))? as u32;
     let elr = eval_u64(probe, "Register(ELR_HYP)").map_err(no_hyp("ELR_hyp"))?;
@@ -744,7 +762,20 @@ fn verify_one(ctx: &mut Context, path: std::path::PathBuf, t32: bool) -> DResult
 pub fn check(ctx: &mut Context, file: &Path, options: &check::Options) -> DResult<Outcome> {
     let path = resolve_file(ctx.cwd, file);
     let parsed = check::load(&path)?;
-    let report = check::run(ctx.probe, ctx.per, &parsed, options)?;
+    let tree = match parsed.reads_clocks(options.variant.as_deref()) {
+        true => Some(
+            clock_tree(ctx, None)
+                .map_err(|error| error.context("read.clock"))?
+                .1,
+        ),
+        false => None,
+    };
+    let inputs = ctx.config.clock.clone();
+    let clocks = tree.as_ref().map(|tree| check::Clocks {
+        tree,
+        inputs: &inputs,
+    });
+    let report = check::run(ctx.probe, ctx.per, &parsed, options, clocks.as_ref())?;
     Ok(Outcome {
         text: report.human(ctx.style),
         json: report.to_json(),
@@ -753,6 +784,23 @@ pub fn check(ctx: &mut Context, file: &Path, options: &check::Options) -> DResul
 }
 
 // --------------------------------------------------------------- R: clock
+
+/// The clock tree description: the given file, or the one chosen by chip.
+fn clock_tree(ctx: &Context, tree: Option<&Path>) -> DResult<(PathBuf, clock::Tree)> {
+    match tree {
+        Some(path) => {
+            let path = resolve_file(ctx.cwd, path);
+            let description = clock::load(&path)?;
+            Ok((path, description))
+        }
+        None => {
+            let Some(chip) = crate::flash::chip_name(ctx.config) else {
+                fail!("no chip name: set target.cpu in trace32.toml or pass --tree <file>");
+            };
+            clock::find(chip, &clock::library_dir(&crate::pycompat::process_env()))
+        }
+    }
+}
 
 /// R: the clock tree with frequencies, from the clock registers and the
 /// chip's clock tree description.
@@ -765,19 +813,7 @@ pub fn clock(
     // The board's frequencies: trace32.toml first, arguments override.
     let mut inputs = ctx.config.clock.clone();
     inputs.extend(clock::parse_inputs(arguments)?);
-    let (path, description) = match tree {
-        Some(path) => {
-            let path = resolve_file(ctx.cwd, path);
-            let description = clock::load(&path)?;
-            (path, description)
-        }
-        None => {
-            let Some(chip) = crate::flash::chip_name(ctx.config) else {
-                fail!("no chip name: set target.cpu in trace32.toml or pass --tree <file>");
-            };
-            clock::find(chip, &clock::library_dir(&crate::pycompat::process_env()))?
-        }
-    };
+    let (path, description) = clock_tree(ctx, tree)?;
     let report = clock::evaluate(ctx.probe, &description, &inputs)?;
     let mut heading = path.display().to_string();
     if let Some(text) = &description.description {
@@ -923,6 +959,118 @@ pub fn attach(ctx: &mut Context) -> DResult<Outcome> {
         "attached without reset; PowerView reports attach as mode up",
         &commands.join("; "),
     )
+}
+
+/// S: reset through the debugger and stop at the reset vector, with the
+/// project's debugger settings (`target::reset_commands`). Refused while a
+/// PRACTICE script is active.
+pub fn reset(ctx: &mut Context) -> DResult<Outcome> {
+    if ctx.config.cpu.is_empty() {
+        fail!("reset needs target.cpu in trace32.toml: SYStem.RESet clears the CPU setting");
+    }
+    probe::require_idle(ctx.probe)?;
+    let commands = crate::target::reset_commands(ctx.config);
+    for command in &commands {
+        ctx.probe
+            .cmd(command)
+            .map_err(|error| DebugError::from(error).context(command))?;
+    }
+    after_change(
+        ctx,
+        "reset, halted at the reset vector",
+        &commands.join("; "),
+    )
+}
+
+/// How often `do` asks whether its script has ended.
+const DO_POLL: Duration = Duration::from_millis(20);
+
+/// The text of a function result, or "" when TRACE32 cannot evaluate it.
+fn text_or_empty(probe: &mut dyn Probe, expression: &str) -> DResult<String> {
+    Ok(match optional(probe.fnc(expression))? {
+        Some(Value::Text(text)) => text,
+        Some(value) => format_value(&value),
+        None => String::new(),
+    })
+}
+
+/// End every script on the PRACTICE stack (`END`), as t32mcp does after a
+/// script stopped at an error.
+fn end_scripts(probe: &mut dyn Probe) -> DResult<()> {
+    for _ in 0..50 {
+        probe.cmd("END")?;
+        std::thread::sleep(Duration::from_millis(50));
+        if eval_u64(probe, "PRACTICE.SD()")? == 0 {
+            return Ok(());
+        }
+    }
+    fail!("the PRACTICE stack could not be cleared with END")
+}
+
+/// S: run a PRACTICE script and wait until it ends. `cmd "DO ..."` returns
+/// as soon as the script starts, so a following command would run while it
+/// still runs. Refused while another script is active. A script that stops
+/// at an error is ended; one that waits in a dialog or at `STOP` is left for
+/// the user. Like t32mcp, the script counts as stopped only after two polls
+/// in a row, so one that is just starting is not mistaken for a stopped one.
+pub fn run_script(
+    ctx: &mut Context,
+    script: &str,
+    arguments: &[String],
+    timeout: Duration,
+) -> DResult<Outcome> {
+    let path = if script.starts_with('~') {
+        script.to_string()
+    } else {
+        resolve_file(ctx.cwd, Path::new(script))
+            .display()
+            .to_string()
+    };
+    if path.contains('"') {
+        fail!("the script path must not contain a double quote");
+    }
+    let command = std::iter::once(format!("DO \"{path}\""))
+        .chain(arguments.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let probe = &mut *ctx.probe;
+    probe::require_idle(probe)?;
+    // ERROR.OCCURRED() then tells an error of this script from a STOP.
+    probe.cmd("ERROR.RESet")?;
+    probe.cmd(&command)?;
+    let start = Instant::now();
+    let mut stopped_polls = 0;
+    while eval_u64(probe, "PRACTICE.SD()")? != 0 {
+        match probe.practice_state()? {
+            2 => fail!("{script} waits in a dialog; answer it in PowerView"),
+            0 => stopped_polls += 1,
+            _ => stopped_polls = 0,
+        }
+        if stopped_polls >= 2 {
+            if let Some(Value::Bool(true)) = optional(probe.fnc("ERROR.OCCURRED()"))? {
+                let message = text_or_empty(probe, "ERROR.MESSAGE()")?;
+                let line = text_or_empty(probe, "ERROR.CMDLINE()")?;
+                end_scripts(probe)?;
+                probe.cmd("ERROR.RESet")?;
+                fail!(
+                    "{script} stopped at an error and was ended: {message} (command: {})",
+                    line.trim_start_matches("B::")
+                );
+            }
+            fail!(
+                "{script} stopped (STOP or a PRACTICE breakpoint) and is still on the PRACTICE \
+                 stack; continue it in PowerView (CONTinue) or end it (END)"
+            );
+        }
+        if start.elapsed() > timeout {
+            fail!(
+                "{script} still runs after {}s and keeps running; END in PowerView ends it",
+                timeout.as_secs()
+            );
+        }
+        std::thread::sleep(DO_POLL);
+    }
+    after_change(ctx, "script ended", &command)
 }
 
 /// S: `SYStem.Down`, `Break`, `Go` or any command.
@@ -1141,6 +1289,39 @@ mod tests {
                 "\"data abort\" entry of vectors_b at 0x00001020, which is NOT the active table \
                  (HVBAR 0x00000F00 (vectors_a))"
             ),
+            "{}",
+            outcome.text
+        );
+    }
+
+    #[test]
+    fn fault_names_the_mode_when_hyp_registers_cannot_be_read() {
+        let mut probe = halted_hyp_probe();
+        // Halted in a Guest (SVC mode, EL1): C15 and HC15 both fail.
+        probe.set("Register(CPSR)", Value::Int(0x0000_01F3));
+        probe.values.remove("Data.Long(C15:0x4025)");
+        probe.errors.insert(
+            "Data.Long(C15:0x4025)".into(),
+            "bus error at address EC15:0x4025".into(),
+        );
+        let error = run(&mut probe, fault).unwrap_err();
+        assert!(
+            error.message.starts_with(
+                "cannot read HSR (C15:0x4025): the core is halted in svc mode, not in Hyp mode"
+            ),
+            "{error:?}"
+        );
+        assert!(
+            probe
+                .log
+                .contains(&"fnc Data.Long(HC15:0x4025)".to_string())
+        );
+
+        // HC15 reads it: the report is made from EL1.
+        probe.set("Data.Long(HC15:0x4025)", Value::Int(0x9200_004C));
+        let outcome = run(&mut probe, fault).unwrap();
+        assert!(
+            outcome.text.contains("HSR       0x9200004C"),
             "{}",
             outcome.text
         );
@@ -1548,6 +1729,135 @@ mod tests {
             ("STATE.RUN()", Value::Bool(false)),
         ]);
         run(&mut probe, attach).unwrap();
+        assert!(probe.commands().is_empty());
+    }
+
+    #[test]
+    fn reset_runs_the_project_sequence_when_idle() {
+        let mut probe = FakeProbe::with(&[
+            ("PRACTICE.SD()", Value::Int(0)),
+            ("SYStem.Mode()", Value::Int(11)),
+            ("STATE.RUN()", Value::Bool(false)),
+        ]);
+        let outcome = run(&mut probe, reset).unwrap();
+        assert_eq!(
+            probe.commands(),
+            [
+                "SYStem.Down",
+                "SYStem.RESet",
+                "SYStem.CPU CPU",
+                "CORE.ASSIGN 1.",
+                "SYStem.Mode Up"
+            ]
+        );
+        assert!(
+            outcome
+                .text
+                .starts_with("reset, halted at the reset vector (now: up, halted)"),
+            "{}",
+            outcome.text
+        );
+
+        probe.set("PRACTICE.SD()", Value::Int(1));
+        probe.log.clear();
+        let error = run(&mut probe, reset).unwrap_err();
+        assert!(error.message.starts_with("PowerView is busy"), "{error:?}");
+        assert!(probe.commands().is_empty());
+
+        probe.set("PRACTICE.SD()", Value::Int(0));
+        probe.failing_commands.push("SYStem.Mode Up".into());
+        let error = run(&mut probe, reset).unwrap_err();
+        assert!(error.message.starts_with("SYStem.Mode Up: "), "{error:?}");
+    }
+
+    fn script_probe() -> FakeProbe {
+        let mut probe = FakeProbe::with(&[
+            ("SYStem.Mode()", Value::Int(11)),
+            ("STATE.RUN()", Value::Bool(false)),
+            ("PRACTICE.SD()", Value::Int(0)),
+        ]);
+        // Idle before DO; the tests queue the depths the polls see.
+        probe.queue("PRACTICE.SD()", &[Value::Int(0)]);
+        probe
+    }
+
+    #[test]
+    fn do_waits_until_the_script_ends() {
+        let mut probe = script_probe();
+        probe.queue(
+            "PRACTICE.SD()",
+            &[Value::Int(1), Value::Int(1), Value::Int(0)],
+        );
+        probe.practice_states.extend([1, 1]);
+        let outcome = run(&mut probe, |ctx| {
+            run_script(
+                ctx,
+                "~~/demo/x.cmm",
+                &["A=1".into()],
+                Duration::from_secs(5),
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            probe.commands(),
+            ["ERROR.RESet", "DO \"~~/demo/x.cmm\" A=1"]
+        );
+        assert!(outcome.text.starts_with("script ended"), "{}", outcome.text);
+        let relative = run(&mut script_probe(), |ctx| {
+            let path = ctx.cwd.join("setup.cmm").display().to_string();
+            run_script(ctx, "setup.cmm", &[], Duration::from_secs(5)).map(|o| (o, path))
+        })
+        .unwrap();
+        assert_eq!(relative.0.json["command"], format!("DO \"{}\"", relative.1));
+    }
+
+    #[test]
+    fn do_ends_a_script_that_stopped_at_an_error() {
+        let mut probe = script_probe();
+        // Two stopped polls, then END empties the stack.
+        probe.queue(
+            "PRACTICE.SD()",
+            &[Value::Int(1), Value::Int(1), Value::Int(0)],
+        );
+        probe.practice_states.extend([0, 0]);
+        probe.set("ERROR.OCCURRED()", Value::Bool(true));
+        probe.set("ERROR.MESSAGE()", Value::Text("bus error".into()));
+        probe.set("ERROR.CMDLINE()", Value::Text("B::Data.Set 0x0 1".into()));
+        let error = run(&mut probe, |ctx| {
+            run_script(ctx, "~~/x.cmm", &[], Duration::from_secs(5))
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "~~/x.cmm stopped at an error and was ended: bus error (command: Data.Set 0x0 1)"
+        );
+        assert_eq!(
+            probe.commands(),
+            ["ERROR.RESet", "DO \"~~/x.cmm\"", "END", "ERROR.RESet"]
+        );
+    }
+
+    #[test]
+    fn do_leaves_a_dialog_or_a_busy_powerview_alone() {
+        let mut probe = script_probe();
+        probe.queue("PRACTICE.SD()", &[Value::Int(1)]);
+        probe.practice_states.extend([2]);
+        let error = run(&mut probe, |ctx| {
+            run_script(ctx, "~~/x.cmm", &[], Duration::from_secs(5))
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "~~/x.cmm waits in a dialog; answer it in PowerView"
+        );
+        assert!(!probe.commands().contains(&"END"));
+
+        let mut probe = FakeProbe::with(&[("PRACTICE.SD()", Value::Int(2))]);
+        let error = run(&mut probe, |ctx| {
+            run_script(ctx, "~~/x.cmm", &[], Duration::from_secs(5))
+        })
+        .unwrap_err();
+        assert!(error.message.starts_with("PowerView is busy"), "{error:?}");
         assert!(probe.commands().is_empty());
     }
 

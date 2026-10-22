@@ -68,9 +68,8 @@ fn index(value: u64) -> Result<usize, String> {
     usize::try_from(value).map_err(|_| "ELF offset out of range".to_string())
 }
 
-/// The `PT_LOAD` segments with `p_filesz > 0` (NOLOAD and `.bss`-only
-/// segments have nothing to compare).
-pub fn load_segments(bytes: &[u8]) -> Result<Vec<Segment>, String> {
+/// The reader for an ELF file and whether it is ELF64.
+fn header(bytes: &[u8]) -> Result<(Reader<'_>, bool), String> {
     if bytes.len() < 16 || &bytes[..4] != b"\x7fELF" {
         return Err("not an ELF file".into());
     }
@@ -84,7 +83,49 @@ pub fn load_segments(bytes: &[u8]) -> Result<Vec<Segment>, String> {
         2 => false,
         other => return Err(format!("unknown ELF data encoding {other}")),
     };
-    let r = Reader { bytes, little };
+    Ok((Reader { bytes, little }, wide))
+}
+
+/// The names of the sections, e.g. `.text`, `.debug_line`. `config` uses it
+/// to tell an ELF without a line table, which TRACE32 can show only as
+/// assembly.
+pub fn section_names(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let (r, wide) = header(bytes)?;
+    let (shoff, shentsize, shnum, shstrndx) = if wide {
+        (r.u64(0x28)?, r.u16(0x3A)?, r.u16(0x3C)?, r.u16(0x3E)?)
+    } else {
+        (r.u32(0x20)?, r.u16(0x2E)?, r.u16(0x30)?, r.u16(0x32)?)
+    };
+    if shoff == 0 || shnum == 0 {
+        return Ok(Vec::new());
+    }
+    // (sh_name, sh_offset, sh_size) of one section header.
+    let section = |number: u64| -> Result<(u64, u64, u64), String> {
+        let base = index(shoff + number * shentsize)?;
+        Ok(if wide {
+            (r.u32(base)?, r.u64(base + 0x18)?, r.u64(base + 0x20)?)
+        } else {
+            (r.u32(base)?, r.u32(base + 0x10)?, r.u32(base + 0x14)?)
+        })
+    };
+    let (_, strings_offset, strings_size) = section(shstrndx)?;
+    let strings = r.get(index(strings_offset)?, index(strings_size)?)?;
+    (0..shnum)
+        .map(|number| {
+            let (name, _, _) = section(number)?;
+            let tail = strings
+                .get(index(name)?..)
+                .ok_or_else(|| "section name out of range".to_string())?;
+            let end = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
+            Ok(String::from_utf8_lossy(&tail[..end]).into_owned())
+        })
+        .collect()
+}
+
+/// The `PT_LOAD` segments with `p_filesz > 0` (NOLOAD and `.bss`-only
+/// segments have nothing to compare).
+pub fn load_segments(bytes: &[u8]) -> Result<Vec<Segment>, String> {
+    let (r, wide) = header(bytes)?;
     let (phoff, phentsize, phnum) = if wide {
         (r.u64(0x20)?, r.u16(0x36)?, r.u16(0x38)?)
     } else {
@@ -166,6 +207,56 @@ pub fn compare(probe: &mut dyn Probe, segments: &[Segment]) -> DResult<Vec<Segme
 pub mod tests {
     use super::*;
     use crate::debug::probe::fake::FakeProbe;
+
+    /// A little-endian ELF32 with no program headers and these sections
+    /// (after the null section and `.shstrtab`).
+    pub fn elf32_sections(names: &[&str]) -> Vec<u8> {
+        let mut strings = b"\0.shstrtab\0".to_vec();
+        let mut name_offsets = Vec::new();
+        for name in names {
+            name_offsets.push(strings.len() as u32);
+            strings.extend_from_slice(name.as_bytes());
+            strings.push(0);
+        }
+        let strings_offset = 52u32;
+        let shoff = strings_offset + strings.len() as u32;
+        let count = names.len() as u16 + 2;
+        let mut bytes = vec![0u8; 52];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 1;
+        bytes[5] = 1;
+        bytes[6] = 1;
+        bytes[0x20..0x24].copy_from_slice(&shoff.to_le_bytes());
+        bytes[0x2E..0x30].copy_from_slice(&40u16.to_le_bytes());
+        bytes[0x30..0x32].copy_from_slice(&count.to_le_bytes());
+        bytes[0x32..0x34].copy_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&strings);
+        let header = |name: u32, offset: u32, size: u32| {
+            let mut entry = vec![0u8; 40];
+            entry[..4].copy_from_slice(&name.to_le_bytes());
+            entry[0x10..0x14].copy_from_slice(&offset.to_le_bytes());
+            entry[0x14..0x18].copy_from_slice(&size.to_le_bytes());
+            entry
+        };
+        bytes.extend(header(0, 0, 0));
+        bytes.extend(header(1, strings_offset, strings.len() as u32));
+        for offset in name_offsets {
+            bytes.extend(header(offset, 0, 0));
+        }
+        bytes
+    }
+
+    #[test]
+    fn section_names_come_from_shstrtab() {
+        let bytes = elf32_sections(&[".text", ".debug_line"]);
+        assert_eq!(
+            section_names(&bytes).unwrap(),
+            ["", ".shstrtab", ".text", ".debug_line"]
+        );
+        let stripped = elf32(&[(0x100, 0x100, "CODE", 4)], None);
+        assert!(section_names(&stripped).unwrap().is_empty());
+        assert!(section_names(b"not an elf").is_err());
+    }
 
     /// A little-endian ELF32 with the given (paddr, vaddr, filesz, memsz, data)
     /// program headers; the data follows the headers.

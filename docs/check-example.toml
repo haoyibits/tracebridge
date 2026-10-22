@@ -68,3 +68,11 @@ name = "debug UART enabled"
 read = { reg = "UART0_CR.UARTEN" }
 expect = { eq = 1 }
 variants = ["debug", "trace"]
+
+# A clock of the tree `tracebridge debug clock` computes (same description,
+# same [clock] frequencies in trace32.toml). Any of state ("on"/"off"), hz
+# (within half a hertz; implies "on"), source and warnings (the exact list).
+[[check]]
+name = "PLL locked at 200 MHz"
+read = { clock = "PLL" }
+expect = { hz = 200_000_000, source = "XOSC", warnings = [] }

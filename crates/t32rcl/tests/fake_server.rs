@@ -197,6 +197,25 @@ fn cmm_detects_stack_underflow() {
 }
 
 #[test]
+fn practice_state_is_a_little_endian_integer() {
+    let server = FakeServer::start(vec![session(vec![
+        Step::Exchange {
+            request: request(0x72, 0x03, 5, &[], None),
+            reply: ok(5, &[2, 0, 0, 0]),
+        },
+        Step::Exchange {
+            request: request(0x72, 0x03, 6, &[], None),
+            reply: ok(6, &[]),
+        },
+    ])]);
+    let mut debugger = connect(&server);
+    assert_eq!(debugger.practice_state().unwrap(), 2);
+    assert_eq!(debugger.practice_state().unwrap(), 0);
+    drop(debugger);
+    server.finish();
+}
+
+#[test]
 fn practice_idle_when_the_stack_is_empty() {
     let server = FakeServer::start(vec![session(vec![fnc(5, "PRACTICE.SD()", 0x0008, "0.")])]);
     let mut debugger = connect(&server);

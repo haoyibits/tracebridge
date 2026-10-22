@@ -161,6 +161,30 @@ pub fn attach_commands(config: &Config) -> Vec<String> {
     commands
 }
 
+/// The commands that reset the chip through the debugger and stop the core
+/// at the reset vector. `SYStem.RESet` clears every SYStem setting, so the
+/// CPU, memory access and core assignment are set again before `SYStem.Mode
+/// Up`, and the JTAG clock after it, in the order the flash scripts use.
+/// A project that wrote this sequence by hand once left out `CORE.ASSIGN`,
+/// and `SYStem.Mode Up` failed with "debug port fail".
+pub fn reset_commands(config: &Config) -> Vec<String> {
+    let mut commands = vec!["SYStem.Down".to_string(), "SYStem.RESet".to_string()];
+    if !config.cpu.is_empty() {
+        commands.push(format!("SYStem.CPU {}", config.cpu));
+    }
+    if !config.mem_access.is_empty() {
+        commands.push(format!("SYStem.MemAccess {}", config.mem_access));
+    }
+    if !config.cores.is_empty() {
+        commands.push(format!("CORE.ASSIGN {}", config.cores));
+    }
+    commands.push("SYStem.Mode Up".into());
+    if !config.jtag_clock.is_empty() {
+        commands.push(format!("SYStem.JtagClock {}", config.jtag_clock));
+    }
+    commands
+}
+
 /// `setup_debug`: attach if needed, load symbols, enable RTOS awareness and run.
 pub fn setup_debug(config: &Config, debugger: &mut impl Rcl) -> t32rcl::Result<()> {
     if !debugger.system_up()? {
@@ -467,6 +491,37 @@ pub mod tests {
                 "SYStem.MemAccess DAP",
                 "CORE.ASSIGN 1.",
                 "SYStem.Mode Attach"
+            ]
+        );
+    }
+
+    #[test]
+    fn reset_commands_set_the_debugger_up_again() {
+        let (_dir, mut config) = fixture();
+        config.mem_access = "AXI".into();
+        config.jtag_clock = "10MHz".into();
+        assert_eq!(
+            reset_commands(&config),
+            [
+                "SYStem.Down",
+                "SYStem.RESet",
+                "SYStem.CPU CPU",
+                "SYStem.MemAccess AXI",
+                "CORE.ASSIGN 1.",
+                "SYStem.Mode Up",
+                "SYStem.JtagClock 10MHz"
+            ]
+        );
+        config.mem_access.clear();
+        config.jtag_clock.clear();
+        config.cores.clear();
+        assert_eq!(
+            reset_commands(&config),
+            [
+                "SYStem.Down",
+                "SYStem.RESet",
+                "SYStem.CPU CPU",
+                "SYStem.Mode Up"
             ]
         );
     }

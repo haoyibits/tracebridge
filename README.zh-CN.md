@@ -14,7 +14,7 @@
 | `tracebridge rtt` | 双向 SEGGER RTT 终端（Ctrl-C 退出） |
 | `tracebridge vscode` | 往 `.vscode/` 写入 `TRACE32: Attach` 调试配置 |
 | `tracebridge rustrover` | 往 `.run/` 写入 `TRACE32: Attach` 运行配置 |
-| `tracebridge debug` | 查看寄存器、内存、异常现场，检查板子上是不是刚编译的 ELF，不复位目标 |
+| `tracebridge debug` | 查看寄存器、内存、异常现场，检查板子上是不是刚编译的 ELF；除了 `debug reset` 都不复位目标 |
 | `tracebridge chips <芯片>` | 查看 `flash` 会给这个芯片用哪个烧录脚本 |
 | `tracebridge adapter` | `t32debugadapter` 前面的 DAP 代理，由 IDE 自动启动 |
 | `tracebridge skill` | 安装 AI agent 用的 skill，说明哪些事交给 tracebridge、哪些交给 Lauterbach 的 t32mcp |
@@ -80,7 +80,9 @@ tracebridge vscode          # 或者：tracebridge rustrover
 2. `tracebridge flash`（只更新符号时用 `tracebridge load`）。PowerView 由 tracebridge 启动时，工具栏上还会多出 **Flash** 和 **Load ELF** 两个按钮。
 3. 在 IDE 里调试（见下文），或者直接用 PowerView。
 4. `tracebridge rtt` 打开目标板的 RTT 控制台。
-5. `tracebridge debug` 查看寄存器、内存和异常现场，或检查板子上跑的是不是刚编译的 ELF。它不会复位目标。
+5. `tracebridge debug` 查看寄存器、内存和异常现场，或检查板子上跑的是不是刚编译的 ELF。除了 `debug reset`，它不会复位目标。
+
+**List 窗口里只有汇编**：说明 ELF 里没有 DWARF 行号表，`tracebridge config` 会对此给出警告。编译时要带调试信息。Rust 的 release 构建默认不带，需要在 profile 里写 `[profile.release] debug = true`；它只影响 ELF 文件，不改变烧进去的代码。
 
 ## 配置
 
@@ -186,7 +188,7 @@ tracebridge rtt --output-only   # 不转发键盘输入
 
 ## 查看目标状态：`tracebridge debug`
 
-`tracebridge debug` 通过 Remote API，从已经在运行的 PowerView 里读取寄存器、内存和异常现场。它**从不复位目标**：连接时不会发 `SYStem.Up`、`SYStem.Mode Go` 或任何复位命令，也不会启动 PowerView。所以要先用 `tracebridge open`、`flash` 或 `load` 把 PowerView 开起来。
+`tracebridge debug` 通过 Remote API，从已经在运行的 PowerView 里读取寄存器、内存和异常现场。**只有 `debug reset` 会复位目标**：连接时和其他命令都不会发 `SYStem.Up`、`SYStem.Mode Go` 或任何复位命令，`debug` 也不会启动 PowerView。所以要先用 `tracebridge open`、`flash` 或 `load` 把 PowerView 开起来。
 
 ### 两种用法
 
@@ -250,7 +252,7 @@ t32 [up, halted]> go
 | `status` | R | 调试器模式、运行状态、供电、CPU；停核时还显示 PC（符号+偏移）和解码后的 CPSR |
 | `reg <名字\|地址>…` | R | 按 PER 文件里的名字（`HSR`）、字段（`HSCTLR.C`，同时显示 BITFLD 的文字含义）、完整 PER 路径或原始地址（`C15:0x4025`、`AD:0x40000000`）读寄存器 |
 | `mem <地址\|符号> [个数]` | R | 以十六进制显示若干个 32 位字，默认 1 个 |
-| `fault` | R | AArch32 Hyp 异常报告：向量槽位（PC 落在 HVBAR 以外的另一张向量表里时也会指出）、解码后的 HSR、HDFAR 或 HIFAR、带符号的 ELR_hyp、SPSR_hyp。HSR 为 0 时显示没有记录到异常 |
+| `fault` | R | AArch32 Hyp 异常报告：向量槽位（PC 落在 HVBAR 以外的另一张向量表里时也会指出）、解码后的 HSR、HDFAR 或 HIFAR、带符号的 ELR_hyp、SPSR_hyp。HSR 为 0 时显示没有记录到异常。核停在 Hyp 以外的模式时，改用 `HC15:` 读 Hyp 寄存器（见下文） |
 | `eval <表达式>` | R | 求任意 PRACTICE 表达式的值 |
 | `verify [elf] [--t32]` | R | 检查目标内存里是不是 ELF 的可加载内容 |
 | `check <文件> [--variant V] [--dry-run]` | R | 按数据文件执行验收检查（见下文） |
@@ -258,12 +260,16 @@ t32 [up, halted]> go
 | `clock [时钟=频率…] [--tree 文件] [--html]` | R | 读时钟寄存器，算出整棵时钟树和每个时钟的频率（见下文）；`--html` 另外生成一张图 |
 | `watch <文件\|名字…>` | UI | 打开只包含这些寄存器的 PER.Watch 窗口（需要 PowerView build 176763，即 09/2025 或更新） |
 | `attach` | S | `SYStem.Mode Attach`：不复位，核保持原来的运行或停止状态。之后 PowerView 显示的模式是 up |
+| `reset` | S | 通过调试器复位芯片，停在复位向量：`SYStem.Down`、`SYStem.RESet`，再按 `trace32.toml` 设置 `SYStem.CPU`、`SYStem.MemAccess`、`CORE.ASSIGN`，然后 `SYStem.Mode Up` 和 `SYStem.JtagClock`。有 PRACTICE 脚本在运行时拒绝执行 |
 | `down` | S | `SYStem.Down` |
 | `break`、`go` | S | 停核、继续运行 |
+| `do [--timeout 秒] <脚本> [参数…]` | S | 用 `DO` 运行 PRACTICE 脚本，并等它结束（`cmd "DO …"` 在脚本一开始就返回）。脚本停在错误上时会被结束（`END`）并报告错误；停在对话框或 `STOP` 上时保持不动，交给你处理。已有脚本在运行时拒绝执行 |
 | `cmd <PRACTICE 命令>` | S | 执行**任意**命令，包括复位和烧录 |
 | `help [命令]`、`reconnect`、`quit` | | 会话命令 |
 
-会话里没有 `up`、`reset`、`flash`，这些请用顶层命令。
+会话里没有 `up` 和 `flash`，请用顶层的 `flash`、`load`。
+
+**Guest 停住时读 Hyp 寄存器。** TRACE32 读 `C15:` 寄存器时，是在核当前的异常级别执行 MRC，所以核停在 EL1 时，读 Hyp 寄存器（op1 = 4，比如 HCR `C15:0x4011`）会报 bus error。这时 tracebridge 会改用 `HC15:` 再读一次。Arm 调试器手册说这个访问类别"不管核当前在什么模式"都能读这些寄存器，但举的例子是 Cortex-A7/A15，在 Cortex-R52 上是否可行还没确认。读不出来时报告原来的错误，`fault` 会说明核停在什么模式。
 
 ### 值是怎么读的
 
@@ -299,9 +305,15 @@ name = "system control"
 read = { reg = "SCTRL" }                 # 也可以是 addr = "AD:0x..."、core = "PC"、expr = "..."
 expect = { eq = 0x00C50078 }             # eq/ne（可加 mask）、nonzero、range、in_symbol、one_of
 variants = ["debug"]                     # 可选：只在 --variant debug 时执行
+
+[[check]]
+name = "core clock"
+read = { clock = "CORE" }                # `debug clock` 时钟树里的一个时钟
+expect = { hz = 400_000_000, source = "PLL", warnings = [] }  # state、hz、source、warnings 任选
 ```
 
 - `eq`、`ne`、`one_of` 里的数字可以写成 `"sym:<符号名>[+偏移]"`。
+- `read.clock` 判断的是 `debug clock` 算出的时钟树（同一份描述文件和 `[clock]` 频率）：`state` 是 `"on"` 或 `"off"`；`hz` 误差在半赫兹以内算相等，并隐含 "on"；`source` 是它的时钟源；`warnings` 要完全一致（比如 `"not locked"`）。每次运行只读一遍时钟树，只读内存映射的寄存器。
 - 输出是每个检查项一行，最后一行汇总。
 - `--dry-run` 只解析所有寄存器名和符号，不读任何寄存器或内存的值，所以核在运行时也能用。
 - 有检查项要读 CP15 或核心寄存器、而核正在运行时，`check` 会报错并停止，除非加了 `--halt`。加了 `--halt` 会先执行 `Break` 并说明，检查完核保持停止，用 `tracebridge debug go` 恢复。
@@ -366,7 +378,7 @@ Lauterbach 官方提供了 [t32mcp](https://gitlab.com/lauterbach/t32mcp)（让 
 | 工作 | 用哪个 |
 |---|---|
 | 停核、运行、单步、核心寄存器、内存、断点、源码、调用栈、符号、任意 PRACTICE 命令 | t32mcp 加 `lauterbach-trace32-debug-basic` |
-| 启动 PowerView、烧录、加载、RTT、查芯片用哪个烧录脚本 | `tracebridge open`、`flash`、`load`、`rtt`、`chips` |
+| 启动 PowerView、烧录、加载、复位到复位向量、RTT、查芯片用哪个烧录脚本 | `tracebridge open`、`flash`、`load`、`debug reset`、`rtt`、`chips` |
 | 按 PER 名读寄存器、Hyp 异常、内存和 ELF 比对、check 文件、时钟树 | `tracebridge debug reg`、`fault`、`verify`、`check`、`clock` |
 
 `debug` 里的通用命令（`status`、`mem`、`eval`、`cmd`、`break`、`go` 等）保留给你在终端里手动用：t32mcp 没有命令行，官方脚本的输出也只显示在 PowerView 的 AREA 窗口里。
@@ -411,7 +423,7 @@ Lauterbach 官方提供了 [t32mcp](https://gitlab.com/lauterbach/t32mcp)（让 
 ```
 
 - `check` 要用**完整的命令行**放行，不能用 `:*` 前缀，因为前缀规则也会放行会停核的 `check … --halt`。
-- 其余命令（`flash`、`load`、`open`、`rtt`，以及 `debug` 的 `attach`、`down`、`break`、`go`、`cmd`、`check --halt`）仍然需要确认。
+- 其余命令（`flash`、`load`、`open`、`rtt`，以及 `debug` 的 `attach`、`reset`、`down`、`break`、`go`、`do`、`cmd`、`check --halt`）仍然需要确认。
 - 要让这些规则匹配上，命令要在项目目录里运行（`debug` 前面不要加 `--config`），`--json` 放在命令参数的后面。
 
 ## 从 Python 版 trace32-bridge 迁移

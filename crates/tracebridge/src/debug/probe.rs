@@ -24,6 +24,8 @@ pub trait Probe {
     fn cmd(&mut self, command: &str) -> t32rcl::Result<()>;
     /// Bulk memory read through the RCL memory API.
     fn read_memory(&mut self, address: &Address, length: usize) -> t32rcl::Result<Vec<u8>>;
+    /// `T32_GetPracticeState`: 0 no script runs, 1 one runs, 2 one waits in a dialog.
+    fn practice_state(&mut self) -> t32rcl::Result<u64>;
 }
 
 impl Probe for Debugger {
@@ -35,6 +37,9 @@ impl Probe for Debugger {
     }
     fn read_memory(&mut self, address: &Address, length: usize) -> t32rcl::Result<Vec<u8>> {
         Debugger::memory_read(self, address, length)
+    }
+    fn practice_state(&mut self) -> t32rcl::Result<u64> {
+        Debugger::practice_state(self)
     }
 }
 
@@ -221,6 +226,12 @@ impl TargetAddress {
     pub fn is_coprocessor(&self) -> bool {
         let class = self.class.to_ascii_uppercase();
         class.ends_with("C15") || class.ends_with("C14")
+    }
+
+    /// A Hyp-mode CP15 register: class `C15` and op1 = 4 (bits 12-14 of the
+    /// command-line address), e.g. HCR `C15:0x4011`, HSR `C15:0x4025`.
+    pub fn is_hyp_cp15(&self) -> bool {
+        self.class.eq_ignore_ascii_case("C15") && (self.value >> 12) & 0x7 == 4
     }
 
     /// The same class at `value + offset`, for PRACTICE expressions.
@@ -465,6 +476,18 @@ pub fn core_running(probe: &mut dyn Probe) -> DResult<bool> {
             let error = DebugError::from(error);
             if error.lost { Err(error) } else { Ok(false) }
         }
+    }
+}
+
+/// Fails while a PRACTICE script is active (its stack is not empty): a
+/// script started in PowerView or by t32mcp, which a reset or a `DO` would
+/// act under. Same test and message as `flash` and `load`.
+pub fn require_idle(probe: &mut dyn Probe) -> DResult<()> {
+    match eval_u64(probe, "PRACTICE.SD()")? {
+        0 => Ok(()),
+        depth => Err(DebugError::new(
+            t32rcl::Error::PracticeBusy(depth.into()).to_string(),
+        )),
     }
 }
 
@@ -1062,15 +1085,37 @@ pub fn verify_address(
 }
 
 /// `Data.Long(<address>)`: 32 bits with PowerView's addressing.
+///
+/// A Hyp register (`C15:` with op1 = 4) fails to read while the core is
+/// halted outside Hyp mode, e.g. in a Guest at EL1: TRACE32 executes the MRC
+/// at the core's current level (bus error at `EC15:...`). Such a read is
+/// tried again with `HC15:`, which the Arm debugger manual names for "CP15
+/// registers which are only available in hypervisor mode ... independent of
+/// the current core mode". The manual describes it for Cortex-A7/A15; that
+/// it works on a Cortex-R52 is not yet confirmed. If it fails too, the
+/// original error stands.
 pub fn read_long(probe: &mut dyn Probe, address: &TargetAddress) -> DResult<u64> {
-    eval_u64(probe, &format!("Data.Long({address})"))
+    match eval_u64(probe, &format!("Data.Long({address})")) {
+        Err(error) if !error.lost && address.is_hyp_cp15() => {
+            let hyp = TargetAddress {
+                class: "HC15".into(),
+                value: address.value,
+            };
+            match eval_u64(probe, &format!("Data.Long({hyp})")) {
+                Err(retry) if retry.lost => Err(retry),
+                Err(_) => Err(error),
+                ok => ok,
+            }
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]
 pub mod fake {
     //! A scripted PowerView for unit tests.
 
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
 
     use super::*;
 
@@ -1090,6 +1135,10 @@ pub mod fake {
         pub errors: HashMap<String, String>,
         /// PER.ReProgram succeeds but loads nothing.
         pub reprogram_fails: bool,
+        /// Answers of `fnc` given once each, in order, before `values`.
+        pub queued: HashMap<String, VecDeque<Value>>,
+        /// Answers of `practice_state`, in order; 0 once they are used up.
+        pub practice_states: VecDeque<u64>,
     }
 
     fn lost() -> t32rcl::Error {
@@ -1109,6 +1158,14 @@ pub mod fake {
 
         pub fn set(&mut self, expression: &str, value: Value) {
             self.values.insert(expression.to_string(), value);
+        }
+
+        /// Answer `expression` with these values, one per call, then with `values`.
+        pub fn queue(&mut self, expression: &str, answers: &[Value]) {
+            self.queued
+                .entry(expression.to_string())
+                .or_default()
+                .extend(answers.iter().cloned());
         }
 
         pub fn commands(&self) -> Vec<&str> {
@@ -1137,6 +1194,13 @@ pub mod fake {
                     operation: t32rcl::Operation::Api,
                     message: message.clone(),
                 }));
+            }
+            if let Some(value) = self
+                .queued
+                .get_mut(expression)
+                .and_then(VecDeque::pop_front)
+            {
+                return Ok(value);
             }
             self.values
                 .get(expression)
@@ -1176,6 +1240,14 @@ pub mod fake {
                 .map(|i| *self.memory.get(&(address.value + i)).unwrap_or(&0xEE))
                 .collect())
         }
+
+        fn practice_state(&mut self) -> t32rcl::Result<u64> {
+            self.log.push("practice_state".into());
+            if self.disconnected {
+                return Err(lost());
+            }
+            Ok(self.practice_states.pop_front().unwrap_or(0))
+        }
     }
 
     /// A TRACE32 function error as the RCL client reports it.
@@ -1192,6 +1264,40 @@ pub mod fake {
 mod tests {
     use super::fake::FakeProbe;
     use super::*;
+
+    #[test]
+    fn hyp_registers_are_read_with_hc15_outside_hyp_mode() {
+        let hcr = TargetAddress::parse("C15:0x4011").unwrap();
+        assert!(hcr.is_hyp_cp15());
+        assert!(!TargetAddress::parse("C15:0x0001").unwrap().is_hyp_cp15());
+        assert!(!TargetAddress::parse("NC15:0x4011").unwrap().is_hyp_cp15());
+
+        let mut probe = FakeProbe::with(&[("Data.Long(HC15:0x4011)", Value::Int(0x8000_0000))]);
+        probe
+            .errors
+            .insert("Data.Long(C15:0x4011)".into(), "bus error".into());
+        assert_eq!(read_long(&mut probe, &hcr).unwrap(), 0x8000_0000);
+
+        // Both fail: the C15 error is the one reported.
+        probe.values.clear();
+        probe.errors.insert(
+            "Data.Long(HC15:0x4011)".into(),
+            "access class unknown".into(),
+        );
+        assert_eq!(
+            read_long(&mut probe, &hcr).unwrap_err().message,
+            "bus error"
+        );
+
+        // An EL1 register is not tried again.
+        let sctlr = TargetAddress::parse("C15:0x0001").unwrap();
+        probe.log.clear();
+        probe
+            .errors
+            .insert("Data.Long(C15:0x0001)".into(), "bus error".into());
+        assert!(read_long(&mut probe, &sctlr).is_err());
+        assert_eq!(probe.log, ["fnc Data.Long(C15:0x0001)"]);
+    }
 
     #[test]
     fn parses_trace32_addresses() {

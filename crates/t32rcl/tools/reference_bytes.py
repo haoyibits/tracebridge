@@ -27,6 +27,9 @@ def show(name, fn):
     link.sent.clear(); fn(); 
     for f in link.sent: print(f"{name:32s} {f.hex(' ')}")
 show("attach(1)", lambda: lib.t32_attach(1))
+link.mid = 0
+show("getpracticestate, id=1", lambda: lib.t32_getpracticestate())
+link.mid = 1
 show("cmd('Go')", lambda: lib.t32_executecommand(b"Go", 4096))
 show("fnc('SYStem.Up()')", lambda: lib.t32_executefunction("SYStem.Up()"))
 a = Address(None, access="E", value=0x20000000)
