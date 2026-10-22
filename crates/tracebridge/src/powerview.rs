@@ -109,13 +109,17 @@ impl Host for RealHost {
 }
 
 /// The PowerView command line. When config.t32 does not enable the Remote
-/// API, it is enabled on the command line with the configured port.
+/// API, it is enabled on the command line with the configured port, for
+/// localhost only: the Remote API has no authentication, and whoever reaches
+/// it can run any command, including `OS.*` on the host. The remote-host
+/// option must come before `--t32-api-rcl`, or PowerView ignores it.
 pub fn powerview_arguments(config: &Config) -> Vec<String> {
     let mut arguments = vec![
         "-c".to_string(),
         config.t32_config.to_string_lossy().into_owned(),
     ];
     if t32config::rcl_settings(&config.t32_config).is_none() {
+        arguments.push("--t32-api-rcl-remotehost=DENY".to_string());
         arguments.push(format!("--t32-api-rcl=TCP:{}", config.rcl_port));
     }
     arguments
@@ -505,7 +509,10 @@ mod tests {
         let config = make_config(dir.path());
         std::fs::write(&config.t32_config, "PBI=\nUSB\n").unwrap();
         let arguments = powerview_arguments(&config);
-        assert_eq!(arguments[2], "--t32-api-rcl=TCP:20000");
+        assert_eq!(
+            arguments[2..],
+            ["--t32-api-rcl-remotehost=DENY", "--t32-api-rcl=TCP:20000"]
+        );
         std::fs::write(&config.t32_config, "RCL=NETTCP\nPORT=20000\n").unwrap();
         assert_eq!(powerview_arguments(&config).len(), 2);
     }

@@ -197,6 +197,29 @@ fn cmm_detects_stack_underflow() {
 }
 
 #[test]
+fn practice_idle_when_the_stack_is_empty() {
+    let server = FakeServer::start(vec![session(vec![fnc(5, "PRACTICE.SD()", 0x0008, "0.")])]);
+    let mut debugger = connect(&server);
+    debugger.require_practice_idle().unwrap();
+    drop(debugger);
+    server.finish();
+}
+
+#[test]
+fn practice_busy_while_a_script_is_on_the_stack() {
+    let server = FakeServer::start(vec![session(vec![fnc(5, "PRACTICE.SD()", 0x0008, "1.")])]);
+    let mut debugger = connect(&server);
+    let failure = debugger.require_practice_idle().unwrap_err();
+    assert!(matches!(failure, Error::PracticeBusy(1)), "{failure:?}");
+    assert!(
+        failure.to_string().starts_with("PowerView is busy"),
+        "{failure}"
+    );
+    drop(debugger);
+    server.finish();
+}
+
+#[test]
 fn cmm_command_error_becomes_practice_error() {
     let server = FakeServer::start(vec![session(vec![
         fnc(5, "PRACTICE.SD()", 0x0008, "0."),

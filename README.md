@@ -19,6 +19,7 @@ your project except a `trace32.toml`.
 | `tracebridge debug` | Inspect registers, memory, faults and the flashed image without resetting the target |
 | `tracebridge chips <name>` | Show which flash script `flash` would use for a chip |
 | `tracebridge adapter` | DAP proxy in front of `t32debugadapter`; the IDE starts it |
+| `tracebridge skill` | Install the AI agent skill that splits the work with Lauterbach's t32mcp |
 
 Supported hosts: macOS (Apple silicon, Intel) and Linux (x86_64, aarch64).
 
@@ -65,10 +66,14 @@ From source: `cargo install --path crates/tracebridge`.
   ```text
   RCL=NETTCP
   PORT=20000
+  REMOTEHOSTDENY
   ```
 
   or leave it out: when `config.t32` has no `RCL=` section, tracebridge starts
-  PowerView with `--t32-api-rcl=TCP:<rcl_port>`.
+  PowerView with `--t32-api-rcl-remotehost=DENY --t32-api-rcl=TCP:<rcl_port>`.
+  `REMOTEHOSTDENY` keeps the port on localhost: the Remote API has no
+  authentication, and whoever reaches it can run any command, including
+  `OS.*` on your machine. `tracebridge config` warns when it is missing.
 
 ## Quick start
 
@@ -578,20 +583,65 @@ Expressions take numbers, register fields (`REG[high:low]`, `REG[bit]`,
 chip's reference manual; vendor documentation is often confidential, so such
 a file belongs in your library, not in a public repository.
 
-### Allowing only the read-only commands (Claude Code)
+## AI agents: tracebridge next to t32mcp
 
-The R commands have no side effects, so an AI assistant can run them without
+Lauterbach ships [t32mcp](https://gitlab.com/lauterbach/t32mcp), an MCP
+server that lets an AI agent run PRACTICE scripts and commands in PowerView,
+and agent skills (`lauterbach-*`, installed from Lauterbach's t32chat) whose
+scripts cover generic debugging. tracebridge does not duplicate them for
+agents. Both tools talk to the same PowerView over the same Remote API port:
+
+| Work | Tool |
+|---|---|
+| Halt, run, step, core registers, memory, breakpoints, source, stack, symbols, any PRACTICE command | t32mcp with `lauterbach-trace32-debug-basic` |
+| Start PowerView, flash, load, RTT, which flash script a chip uses | `tracebridge open`, `flash`, `load`, `rtt`, `chips` |
+| Register by PER name, Hyp fault, target memory against the ELF, check files, clock tree | `tracebridge debug reg`, `fault`, `verify`, `check`, `clock` |
+
+The generic `debug` commands (`status`, `mem`, `eval`, `cmd`, `break`, `go`,
+...) remain for you at the terminal: t32mcp has no command line, and the
+official scripts print into PowerView's AREA window.
+
+Setup:
+
+1. Register t32mcp with the port in `trace32.toml` (`trace32.rcl_port`,
+   default 20000). For Claude Code:
+
+   ```sh
+   claude mcp add-json -s user t32mcp '{"type":"stdio","command":"/path/to/t32mcp","args":["--execution-policy","unrestricted","--port","20000"]}'
+   ```
+
+   Since 0.3.0 t32mcp requires `--execution-policy` (`unrestricted`,
+   `scripts` or `strict`, see its README).
+2. Install Lauterbach's skills, which t32mcp's instructions point the agent
+   to (t32chat's `trace32_install_skills`).
+3. Run `tracebridge skill`. It writes `~/.claude/skills/tracebridge/SKILL.md`
+   (`$CLAUDE_CONFIG_DIR/skills` when set, or `--dir <skills directory>` for
+   other agents), which tells the agent the split above and that running
+   tracebridge is wanted. Run it again after upgrading tracebridge;
+   `tracebridge config` says when the installed skill is outdated.
+
+Side by side:
+
+- PowerView runs one PRACTICE script at a time. `flash` and `load` stop with
+  `PowerView is busy` while a script is active (one t32mcp runs, or any
+  script paused in a dialog or at an error) instead of acting under it. In
+  the other direction t32mcp reports busy while `flash` runs the flash script.
+- tracebridge never selects, creates or closes AREA windows, so t32mcp's
+  output capture (it pipes AREA `A000`) keeps working.
+
+### Allowing the read-only commands (Claude Code)
+
+These commands have no side effects, so an agent can run them without
 asking. In the project's `.claude/settings.json`:
 
 ```json
 {
   "permissions": {
     "allow": [
-      "Bash(tracebridge debug status:*)",
+      "Bash(tracebridge config)",
+      "Bash(tracebridge chips:*)",
       "Bash(tracebridge debug reg:*)",
-      "Bash(tracebridge debug mem:*)",
       "Bash(tracebridge debug fault:*)",
-      "Bash(tracebridge debug eval:*)",
       "Bash(tracebridge debug verify:*)",
       "Bash(tracebridge debug clock:*)",
       "Bash(tracebridge debug check checks/boot.toml)",
@@ -603,11 +653,11 @@ asking. In the project's `.claude/settings.json`:
 ```
 
 `check` is allowed with **exact** command lines rather than a `:*` prefix: a
-prefix rule would also allow `check … --halt`, which stops the core. `watch`
-(UI) only opens a PowerView window and may be added too. Everything else
-(`attach`, `down`, `break`, `go`, `cmd`, `check --halt`, `flash`, `load`) then
-still asks. For these rules to match, run the commands inside the project
-(no `--config` before `debug`) and put `--json` after the command's arguments.
+prefix rule would also allow `check … --halt`, which stops the core.
+Everything else (`flash`, `load`, `open`, `rtt`, the `debug` commands
+`attach`, `down`, `break`, `go`, `cmd`, `check --halt`) still asks. For these
+rules to match, run the commands inside the project (no `--config` before
+`debug`) and put `--json` after the command's arguments.
 
 ## Migrating from the Python trace32-bridge
 
@@ -647,6 +697,10 @@ and Ctrl-C in `rtt` exits with status 0.
   shows which PER file PowerView uses.
 - **Timeouts during flash**: raise `trace32.operation_timeout` and look at the
   PowerView AREA window.
+- **`PowerView is busy: a PRACTICE script is active`** (`flash`, `load`): a
+  script runs, waits in a dialog or stopped at an error, e.g. one an agent
+  started through t32mcp. Let it finish, or end it in PowerView (`END`), then
+  retry.
 - **RTT waits forever**: the firmware has not initialized RTT yet (press
   Continue in the debugger), or `project.program` does not match the loaded
   program name; pass `--cb` to bypass the symbol.

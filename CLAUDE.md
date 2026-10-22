@@ -47,7 +47,7 @@ Python 版假设工具包被复制进项目目录（config.py 的 TOOLKIT_DIR、
 | validate_common 里的 "toolkit path" 检查 | toolkit 路径 | 改为检查 toml 路径和 run_dir（它们都会拼进 TRACE32 命令） |
 
 ## 子命令
-init、config、open、flash、load、adapter、rtt、vscode、rustrover。
+init、config、open、flash、load、adapter、rtt、vscode、rustrover；后来加了 chips、debug（第 8 阶段）和 skill（第 9 阶段）。
 - rtt 后面的参数原样转发给 rtt 自己的解析器（见 cli.py 的 main：在参数里找到第一个 "rtt"，其后的全部参数交给 rtt 解析器，rtt 的默认值来自已加载的配置）
 - 错误统一输出为 `tracebridge: <msg>` 到 stderr，退出码 1；Ctrl-C 退出码 130
 - `--version` 输出版本号和 git hash
@@ -201,6 +201,7 @@ id 回绕：… fe → 00 → 01
 | `vscode/installer.rs` + `assets/tasks.json`、`assets/launch.json` | `vscode/installer.py`、`vscode/*.json` | `test_vscode_installer.py` 的 merge、replace_tokens、install 3 条；**删掉** require_runtime_python 和 clean_toolkit 两条 |
 | `vscode/jsonc.rs` | `vscode/jsonc.py` | `test_jsonc.py` 3 条 |
 | `rustrover.rs` + `assets/rustrover.run.xml` | 新增（LSP4IJ DAPConfiguration） | 新增：生成的 XML 内容、已存在时备份后覆盖 |
+| `skill.rs` + `assets/skill.md` | 新增（第 9 阶段：给 AI agent 的 skill，说明和 t32mcp 的分工） | 新增：渲染内容、幂等安装与备份、版本读取、`CLAUDE_CONFIG_DIR`；`tests/cli.rs` 覆盖安装和 `config` 的提示 |
 
 ## 环境变量（config.py 完整列表）
 | 变量 | 语义 | 目标字段 |
@@ -286,6 +287,7 @@ id 回绕：… fe → 00 → 01
 | 8.4 输出加颜色（先 debug，后其他命令） | ✅ 单测、e2e，并在 pty 里对着假 RCL 服务端跑过会话；0.1.9 已发布 | 见 git log |
 | 8.5 `debug clock` 时钟树 | ✅ 单测、e2e；SR6P6 描述文件用 SDK 默认配置的寄存器值离线核对过；0.1.10 在 SR6P6 上跑通；树形连线和 `--html` 在 0.1.11 发布；按模块的视图在 0.1.12 发布，用开发版对着真板生成过；来源视图的粗线和未选输入列表在 0.1.13 发布 | 见 git log |
 | 8.6 `extra_elf`：多个镜像同一次烧录、加载、核对 | ✅ 单测（命令序列、配置与环境变量、缺文件报错）；0.1.14 发布；还没在硬件上跑过（rustvisor S4b 用它烧 EL2 镜像加 Guest） | 见 git log |
+| 9 与官方 t32mcp 配合 | ✅ 单测、e2e；未发布；Remote API 只监听本机、PowerView 忙时不动、`skill` 命令都还没在真 PowerView 上验证 | 见 git log |
 
 **debug 的决定**（2026-09-29，任务说明是本地文件 `tracebridge-debug-prompt.md`，里面有项目数据，不提交；用户让我自己定这些点）：
 - 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`。
@@ -349,6 +351,20 @@ id 回绕：… fe → 00 → 01
   - `symbolize`：地址必须落在 `sYmbol.BEGIN..=sYmbol.END` 之内。符号没有大小时，只有偏移小于 0x100 才显示 symbol+offset，否则显示 "(no symbol)"，因为 sYmbol.NAME() 会给出下方最近的符号，哪怕隔得很远。
   - `fault`：HSR = 0 时显示 "no exception recorded"，不再解码 EC。
 
+**与官方 t32mcp 配合**（2026-10-22，第 9 阶段）。用户要求"官方有的内容就用官方的，我们主要做定制化的内容，并且两个工具能相互配合"，并要求一次改好。背景：Lauterbach 发布了 t32mcp 0.3.0（MCP 服务，Apache-2.0，自带纯 Rust 的 RCL TCP 实现 `t32mcp-rs/src/t32api.rs`）和 agent skills 0.1.0（`lauterbach-*`，从 t32chat 安装，许可证"仅限与 TRACE32 一起使用"），覆盖了 agent 侧的通用调试。
+- **分工**：agent 的通用调试（停核、运行、单步、核心寄存器、内存、断点、源码、栈、符号、任意 PRACTICE 命令）走 t32mcp 和 `lauterbach-trace32-debug-basic`。tracebridge 负责项目和定制部分：`init`、`config`、`open`、`flash`、`load`、`chips`、`rtt`、IDE 配置，以及 `debug` 的 `reg`、`fault`、`verify`、`check`、`clock`、`watch`。
+- **`debug` 的通用命令保留**（`status`、`mem`、`eval`、`cmd`、`attach`、`down`、`break`、`go`）：用户偶尔在终端里手动用，而官方没有能把结果打印到终端的命令行（t32mcp 只是 MCP 服务；skill 脚本和 `t32rem` 的输出都只进 PowerView 的 AREA 窗口）。只是不再建议 agent 用它们，README 的放行列表也去掉了 `status`、`mem`、`eval`。
+- **Remote API 只监听本机**：`open` 自己加参数时，在 `--t32-api-rcl=` 前面加 `--t32-api-rcl-remotehost=DENY`（PowerView 的帮助文字写明要放在前面，否则被忽略；本机 R.2026.02 的二进制里有这个选项和 `REMOTEHOSTDENY`）。`config` 在 config.t32 的 RCL 段缺 `REMOTEHOSTDENY` 时给 WARN。原因：Remote API 没有认证，谁连上都能执行 `OS.*`；官方的 t32mcp 文档也要求这样配。
+- **PowerView 忙时不动**：`flash` 和 `load` 先读 `PRACTICE.SD()`，不为 0 就报 `PowerView is busy` 并且什么都不做（连 `SYStem.Down` 都不发）。"栈深为 0 即空闲"是 t32mcp 源码里的判断。实现是 `t32rcl::Debugger::require_practice_idle` 和 `Error::PracticeBusy`，Python 库里没有，`cmm` 本身保持和 Python 一致。原因：以前在别的脚本上面 `DO`，两边共用一个 PRACTICE 栈；对方先结束时栈深降到起始值以下，`cmm` 会报假的 "Practice stack depth error"。工具栏安装仍用原来的 `cmm`，因为冷启动时 PowerView 的启动脚本可能还在跑。
+- **`tracebridge skill`**：把 `assets/skill.md` 写到 `$CLAUDE_CONFIG_DIR/skills/tracebridge/SKILL.md`（默认 `~/.claude/skills`，`--dir` 指定其他目录），不需要 trace32.toml。内容不能抄 `lauterbach-*` skill 的文字。frontmatter 的 `metadata.version` 是 tracebridge 的版本，`config` 据此提示"未安装"或"已过期"。skill 里要明确写出"用户希望 agent 运行 tracebridge"，因为 t32mcp 的服务端指令要求 agent 不要用其他方式驱动调试器，除非用户要求。
+- **决定不做的**：
+  - 把 flash/load 生成 PRACTICE 脚本给 t32mcp、工具栏共用：要把硬件上验证过的烧录流程搬进 PRACTICE 重新验证，唯一的新收益是 strict 策略下 agent 也能烧录，用户用的是 unrestricted。
+  - 让 tracebridge 自己也当 MCP 服务：两个 MCP 同时操作一个 PowerView，agent 会搞不清该用哪个。
+  - 生成项目级 `.mcp.json`：端口是默认的 20000 时，用户级配置就够了。
+  - 用 t32mcp 的 `t32api.rs` 替换 t32rcl：它不是公开的 crate，而 t32rcl 已经和 Python 库逐字节对过。
+- **IDE**：Lauterbach 和 JetBrains 在 2026-10-13 公布了 CLion 的 TRACE32 集成（DAP，TRACE32 Debug Adapter 0.1.2，需要 PowerView 09.2026 或 build 195402；这个正式版截至 2026-10-22 还没发布，用户装的是 R.2026.02）。对 Rust 项目暂时没用：CLion 和 RustRover 都不能把 DAP 调试器挂到 Cargo 运行配置上（JetBrains YouTrack RUST-12476，2026-08 仍未解决）。所以 `rustrover`（LSP4IJ）和 `adapter` 的 launch→attach 改写继续保留，等 RUST-12476 解决后再评估。
+- 本机 t32mcp 在 `~/Documents/Code/t32mcp`（v0.3.0，自己编译）。用户级 MCP 配置原来写的是 `--execution-policy all --skill-root`（照 skills 0.1.0 里 `lauterbach-t32mcp` 的说明写的），0.3.0 不认这两个参数，已改成 `--execution-policy unrestricted --skills ~/.claude/skills`。
+
 **发布方案：手写 GitHub Actions，不用 cargo-dist。** 只有 4 个目标，产物就是 tar.gz 和 sha256，安装位置要求 `~/.local/bin`。cargo-dist 会生成它自己的安装器（默认装到 `~/.cargo/bin`），还要引入 dist 配置和每次重新生成的 workflow，收益小于维护成本。Linux 两个 musl 目标都在对应架构的原生 runner 上构建（ubuntu-24.04 / ubuntu-24.04-arm + musl-tools），不需要 cross；macOS 两个目标都在 macos-14 上构建。
 
 **Homebrew**：通过自己的 tap `haoyibits/homebrew-tap` 发布（`brew install haoyibits/tap/tracebridge`），暂不提交 homebrew-core。
@@ -372,6 +388,9 @@ id 回绕：… fe → 00 → 01
 11. **发布**：推一个 tag，检查 4 个产物和 sha256。确认仓库名 `haoyibits/tracebridge`（install.sh 和 README 里的默认值是按 git 作者名假设的），再用 install.sh 从 GitHub 安装一次。
 12. **debug**：`tracebridge-debug-prompt.md` 里的硬件验收表，以及其中 5 条未确认事项（PER 路径解析、字段名匹配、歧义报告、`SYStem.Mode()` 编码、`/DIFF` 按 LMA 比较）。
 13. **flash 先 Down**：PowerView 处于 Up、核停在应用里时执行 `tracebridge flash`，应该打印 `target is up: SYStem.Down first`，并且烧录成功。
+14. **Remote API 只监听本机**：config.t32 加上 `REMOTEHOSTDENY` 并重启 PowerView 后，`lsof -nP -iTCP:20000 -sTCP:LISTEN` 应显示 `127.0.0.1:20000`，`tracebridge flash`、IDE 调试和 t32mcp 照常能连上。没有 RCL 段时，`tracebridge open` 启动的 PowerView 也应只监听 127.0.0.1。
+15. **PowerView 忙时不动**：在 PowerView 里运行一个停在 `STOP` 或对话框里的脚本，然后执行 `tracebridge flash`，应报 `PowerView is busy`，并且 PowerView 的状态没有变化；脚本结束后再执行，应正常烧录。同样试一次 t32mcp 正在跑脚本的情况。
+16. **skill**：执行 `tracebridge skill` 后开一个新的 Claude Code 会话，让它"烧录并读 HSR"，应该用 `tracebridge flash` 烧录，用 `tracebridge debug reg` 读寄存器，停核等通用操作用 t32mcp。
 
 ### 阶段 0：通读和规划 ✅（本文档）
 

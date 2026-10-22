@@ -64,7 +64,9 @@ pub fn run_target(config: &Config, script: Option<&str>) -> Result<()> {
     run_sequence(config, script, &mut debugger)
 }
 
-/// Flash with `script` when given, then set up debugging.
+/// Flash with `script` when given, then set up debugging. Nothing happens
+/// while a PRACTICE script is active: it may be t32mcp's, sharing this
+/// PowerView, and both would act on one target and one PRACTICE stack.
 pub fn run_sequence(config: &Config, script: Option<&str>, debugger: &mut impl Rcl) -> Result<()> {
     let action = if script.is_some() {
         Action::Flash
@@ -72,6 +74,7 @@ pub fn run_sequence(config: &Config, script: Option<&str>, debugger: &mut impl R
         Action::Load
     };
     let result = (|| {
+        debugger.require_practice_idle()?;
         if let Some(script) = script {
             program(config, script, debugger)?;
         }
@@ -303,7 +306,8 @@ pub mod tests {
         assert_eq!(
             recorder.calls,
             [
-                "system_up".to_string(),
+                "practice_idle".to_string(),
+                "system_up".into(),
                 "cmd SYStem.Mode Down".into(),
                 "cmd SYStem.CPU CPU".into(),
                 "cmd SYStem.MemAccess AXI".into(),
@@ -335,7 +339,8 @@ pub mod tests {
         assert_eq!(
             recorder.calls,
             [
-                "system_up".to_string(),
+                "practice_idle".to_string(),
+                "system_up".into(),
                 format!("cmd Data.LOAD.Elf \"{elf}\" /NoCODE"),
                 "cmd List.auto".into(),
                 "state_run".into(),
@@ -366,7 +371,8 @@ pub mod tests {
         assert_eq!(
             recorder.calls,
             [
-                "system_up".to_string(),
+                "practice_idle".to_string(),
+                "system_up".into(),
                 "cmd SYStem.Down".into(),
                 format!("cmm \"{script}\" PREPAREONLY DUALPORT=1 X=2 Some(1s)"),
                 "cmd SYStem.JtagClock 10MHz".into(),
@@ -482,6 +488,25 @@ pub mod tests {
             .unwrap();
         assert_eq!(commands[load + 1], "FLASH.ReProgram OFF");
         assert_eq!(commands.len(), load + 2);
+    }
+
+    #[test]
+    fn a_busy_powerview_is_left_alone() {
+        let (_dir, config) = fixture();
+        let mut recorder = Recorder {
+            busy: true,
+            system_up: true,
+            ..Default::default()
+        };
+        let script = config.resolved_flash_script();
+        let error = run_sequence(&config, Some(&script), &mut recorder).unwrap_err();
+        assert!(
+            error
+                .0
+                .starts_with("TRACE32 flash failed: PowerView is busy"),
+            "{error}"
+        );
+        assert_eq!(recorder.calls, ["practice_idle"]);
     }
 
     #[test]

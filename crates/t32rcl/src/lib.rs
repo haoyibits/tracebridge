@@ -199,6 +199,18 @@ impl Debugger {
         self.fnc_bool("STATE.RUN()")
     }
 
+    /// `Error::PracticeBusy` while a PRACTICE script is active: the stack is
+    /// not empty (t32mcp's test for "idle"), so the script runs, waits in a
+    /// dialog or stopped at an error. Not in the Python library. A `DO` from
+    /// `cmm` would run on top of that script and share its stack; a command
+    /// would change the state under its feet.
+    pub fn require_practice_idle(&mut self) -> Result<()> {
+        match self.fnc_int("PRACTICE.SD()")? {
+            0 => Ok(()),
+            depth => Err(Error::PracticeBusy(depth)),
+        }
+    }
+
     /// `Debugger.cmm`: run `DO <script>` and wait until the PRACTICE stack
     /// returns to its previous depth. `None` waits forever; a zero duration
     /// does not wait at all.

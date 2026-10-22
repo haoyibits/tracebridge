@@ -17,6 +17,7 @@
 | `tracebridge debug` | 查看寄存器、内存、异常现场，检查板子上是不是刚编译的 ELF，不复位目标 |
 | `tracebridge chips <芯片>` | 查看 `flash` 会给这个芯片用哪个烧录脚本 |
 | `tracebridge adapter` | `t32debugadapter` 前面的 DAP 代理，由 IDE 自动启动 |
+| `tracebridge skill` | 安装 AI agent 用的 skill，说明哪些事交给 tracebridge、哪些交给 Lauterbach 的 t32mcp |
 
 支持的主机：macOS（Apple 芯片、Intel）和 Linux（x86_64、aarch64）。
 
@@ -54,9 +55,11 @@ xattr -d com.apple.quarantine /path/to/tracebridge
   ```text
   RCL=NETTCP
   PORT=20000
+  REMOTEHOSTDENY
   ```
 
-  也可以不写：`config.t32` 里没有 `RCL=` 时，tracebridge 启动 PowerView 会自动加上 `--t32-api-rcl=TCP:<rcl_port>`。
+  也可以不写：`config.t32` 里没有 `RCL=` 时，tracebridge 启动 PowerView 会自动加上 `--t32-api-rcl-remotehost=DENY --t32-api-rcl=TCP:<rcl_port>`。
+  `REMOTEHOSTDENY` 让端口只接受本机连接。Remote API 没有任何认证，谁能连上谁就能执行任意命令，包括在你的电脑上执行 `OS.*`。缺这一行时 `tracebridge config` 会给出警告。
 
 ## 快速开始
 
@@ -356,19 +359,47 @@ group = "PLL"                            # 可选：它在图里属于哪个面�
 
 表达式里可以用数字、寄存器字段（`REG[高:低]`、`REG[位]`、`REG`）、`+ - * / ^`、`== !=` 和括号。描述文件要对照芯片的参考手册写；厂商文档常常是保密的，所以这类文件应该放在自己的库目录里，不要放进公开仓库。
 
-### 只放行只读命令（Claude Code）
+## AI agent：tracebridge 和 t32mcp 配合
 
-R 类命令没有副作用，可以让 AI 助手不经询问直接执行。在项目的 `.claude/settings.json` 里写：
+Lauterbach 官方提供了 [t32mcp](https://gitlab.com/lauterbach/t32mcp)（让 AI agent 在 PowerView 里运行 PRACTICE 脚本和命令的 MCP 服务），以及一套 agent skills（`lauterbach-*`，从 Lauterbach 的 t32chat 安装），里面的脚本覆盖了通用调试。tracebridge 不再为 agent 重复这些功能。两个工具连同一个 PowerView、同一个 Remote API 端口，分工如下：
+
+| 工作 | 用哪个 |
+|---|---|
+| 停核、运行、单步、核心寄存器、内存、断点、源码、调用栈、符号、任意 PRACTICE 命令 | t32mcp 加 `lauterbach-trace32-debug-basic` |
+| 启动 PowerView、烧录、加载、RTT、查芯片用哪个烧录脚本 | `tracebridge open`、`flash`、`load`、`rtt`、`chips` |
+| 按 PER 名读寄存器、Hyp 异常、内存和 ELF 比对、check 文件、时钟树 | `tracebridge debug reg`、`fault`、`verify`、`check`、`clock` |
+
+`debug` 里的通用命令（`status`、`mem`、`eval`、`cmd`、`break`、`go` 等）保留给你在终端里手动用：t32mcp 没有命令行，官方脚本的输出也只显示在 PowerView 的 AREA 窗口里。
+
+配置步骤：
+
+1. 注册 t32mcp，端口和 `trace32.toml` 里的 `trace32.rcl_port` 一致（默认 20000）。Claude Code 的写法：
+
+   ```sh
+   claude mcp add-json -s user t32mcp '{"type":"stdio","command":"/path/to/t32mcp","args":["--execution-policy","unrestricted","--port","20000"]}'
+   ```
+
+   t32mcp 从 0.3.0 起必须指定 `--execution-policy`（`unrestricted`、`scripts` 或 `strict`，见它的 README）。
+2. 安装 Lauterbach 的 skills（用 t32chat 的 `trace32_install_skills`）。t32mcp 的说明会让 agent 去用它们。
+3. 运行 `tracebridge skill`。它写入 `~/.claude/skills/tracebridge/SKILL.md`（设置了 `$CLAUDE_CONFIG_DIR` 时写到 `$CLAUDE_CONFIG_DIR/skills`，其他 agent 用 `--dir <skills 目录>`），告诉 agent 上面的分工，以及用户希望它运行 tracebridge。升级 tracebridge 后再运行一次；skill 过期时 `tracebridge config` 会提示。
+
+同时使用时：
+
+- PowerView 同一时间只能跑一个 PRACTICE 脚本。有脚本在运行时（t32mcp 跑的脚本，或者停在对话框、停在错误上的任何脚本），`flash` 和 `load` 会报 `PowerView is busy` 并停下，不会在它下面做任何操作。反过来，`flash` 运行烧录脚本期间，t32mcp 也会报忙。
+- tracebridge 从不选择、创建或关闭 AREA 窗口，所以不会干扰 t32mcp 读取输出（它通过管道读取 AREA `A000`）。
+
+### 放行只读命令（Claude Code）
+
+下面这些命令没有副作用，可以让 agent 不经询问直接执行。在项目的 `.claude/settings.json` 里写：
 
 ```json
 {
   "permissions": {
     "allow": [
-      "Bash(tracebridge debug status:*)",
+      "Bash(tracebridge config)",
+      "Bash(tracebridge chips:*)",
       "Bash(tracebridge debug reg:*)",
-      "Bash(tracebridge debug mem:*)",
       "Bash(tracebridge debug fault:*)",
-      "Bash(tracebridge debug eval:*)",
       "Bash(tracebridge debug verify:*)",
       "Bash(tracebridge debug clock:*)",
       "Bash(tracebridge debug check checks/boot.toml)",
@@ -380,8 +411,7 @@ R 类命令没有副作用，可以让 AI 助手不经询问直接执行。在�
 ```
 
 - `check` 要用**完整的命令行**放行，不能用 `:*` 前缀，因为前缀规则也会放行会停核的 `check … --halt`。
-- `watch`（UI）只打开 PowerView 窗口，也可以加进来。
-- 其余命令（`attach`、`down`、`break`、`go`、`cmd`、`check --halt`、`flash`、`load`）仍然需要确认。
+- 其余命令（`flash`、`load`、`open`、`rtt`，以及 `debug` 的 `attach`、`down`、`break`、`go`、`cmd`、`check --halt`）仍然需要确认。
 - 要让这些规则匹配上，命令要在项目目录里运行（`debug` 前面不要加 `--config`），`--json` 放在命令参数的后面。
 
 ## 从 Python 版 trace32-bridge 迁移

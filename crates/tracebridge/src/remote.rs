@@ -14,6 +14,8 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The debugger operations the target sequences use; implemented by
 /// `t32rcl::Debugger` and by recording test doubles.
 pub trait Rcl {
+    /// Fails while a PRACTICE script is active, e.g. one t32mcp started.
+    fn require_practice_idle(&mut self) -> t32rcl::Result<()>;
     fn cmd(&mut self, command: &str) -> t32rcl::Result<()>;
     fn cmm(&mut self, script: &str, timeout: Option<Duration>) -> t32rcl::Result<()>;
     fn print(&mut self, text: &str) -> t32rcl::Result<()>;
@@ -22,6 +24,9 @@ pub trait Rcl {
 }
 
 impl Rcl for Debugger {
+    fn require_practice_idle(&mut self) -> t32rcl::Result<()> {
+        Debugger::require_practice_idle(self)
+    }
     fn cmd(&mut self, command: &str) -> t32rcl::Result<()> {
         Debugger::cmd(self, command)
     }
@@ -73,6 +78,8 @@ pub mod tests {
         pub system_up: bool,
         pub state_run: bool,
         pub fail_on: Option<String>,
+        /// A PRACTICE script is active.
+        pub busy: bool,
     }
 
     impl Recorder {
@@ -89,6 +96,13 @@ pub mod tests {
     }
 
     impl Rcl for Recorder {
+        fn require_practice_idle(&mut self) -> t32rcl::Result<()> {
+            self.calls.push("practice_idle".into());
+            match self.busy {
+                true => Err(t32rcl::Error::PracticeBusy(1)),
+                false => Ok(()),
+            }
+        }
         fn cmd(&mut self, command: &str) -> t32rcl::Result<()> {
             self.calls.push(format!("cmd {command}"));
             match &self.fail_on {

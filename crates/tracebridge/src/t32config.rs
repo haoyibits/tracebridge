@@ -6,6 +6,7 @@
 //! ```text
 //! RCL=NETTCP
 //! PORT=20000
+//! REMOTEHOSTDENY
 //! ```
 
 use std::path::Path;
@@ -14,6 +15,10 @@ use std::path::Path;
 pub struct RclSettings {
     pub protocol: String,
     pub port: Option<u16>,
+    /// `REMOTEHOSTDENY`: PowerView accepts Remote API clients from localhost
+    /// only. Without it (or with `REMOTEHOSTALLOW`, the default) it listens on
+    /// every network interface.
+    pub remote_host_deny: bool,
 }
 
 pub fn rcl_settings(path: &Path) -> Option<RclSettings> {
@@ -29,6 +34,7 @@ pub fn parse_rcl_settings(source: &str) -> Option<RclSettings> {
             .then(|| value.trim().to_string())
     })?;
     let mut port = None;
+    let mut remote_host_deny = false;
     for line in lines {
         if line.is_empty() {
             break;
@@ -36,13 +42,21 @@ pub fn parse_rcl_settings(source: &str) -> Option<RclSettings> {
         if line.starts_with(';') {
             continue;
         }
-        if let Some((key, value)) = line.split_once('=') {
-            if key.trim().eq_ignore_ascii_case("PORT") {
+        match line.split_once('=') {
+            Some((key, value)) if key.trim().eq_ignore_ascii_case("PORT") => {
                 port = value.trim().parse().ok();
             }
+            Some(_) => {}
+            None if line.eq_ignore_ascii_case("REMOTEHOSTDENY") => remote_host_deny = true,
+            None if line.eq_ignore_ascii_case("REMOTEHOSTALLOW") => remote_host_deny = false,
+            None => {}
         }
     }
-    Some(RclSettings { protocol, port })
+    Some(RclSettings {
+        protocol,
+        port,
+        remote_host_deny,
+    })
 }
 
 #[cfg(test)]
@@ -56,7 +70,8 @@ mod tests {
             parse_rcl_settings(source),
             Some(RclSettings {
                 protocol: "NETTCP".into(),
-                port: Some(20000)
+                port: Some(20000),
+                remote_host_deny: false,
             })
         );
     }
@@ -68,8 +83,22 @@ mod tests {
             parse_rcl_settings("RCL=NETASSIST\n\nPORT=1\n"),
             Some(RclSettings {
                 protocol: "NETASSIST".into(),
-                port: None
+                port: None,
+                remote_host_deny: false,
             })
         );
+    }
+
+    #[test]
+    fn remote_host_keys_inside_the_section_only() {
+        let deny = parse_rcl_settings("RCL=NETTCP\nPORT=20000\nREMOTEHOSTDENY\n").unwrap();
+        assert!(deny.remote_host_deny);
+        let lower = parse_rcl_settings("RCL=NETTCP\nremotehostdeny\n").unwrap();
+        assert!(lower.remote_host_deny);
+        let allow = parse_rcl_settings("RCL=NETTCP\nREMOTEHOSTDENY\nREMOTEHOSTALLOW\n").unwrap();
+        assert!(!allow.remote_host_deny);
+        let other_section =
+            parse_rcl_settings("RCL=NETTCP\nPORT=1\n\nIC=NETASSIST\nREMOTEHOSTDENY\n");
+        assert!(!other_section.unwrap().remote_host_deny);
     }
 }

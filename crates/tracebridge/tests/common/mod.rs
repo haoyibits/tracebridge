@@ -177,9 +177,9 @@ fn answer(state: &Mutex<State>, data: &[u8]) -> Vec<u8> {
                 "VERSION.PYRCL(1.1.5)" => function_answer(id, 0x0040, "OK"),
                 "SYStem.Up()" => function_answer(id, 0x0001, bool_text(state.system_up)),
                 "STATE.RUN()" => function_answer(id, 0x0001, bool_text(state.state_run)),
-                "PRACTICE.SD()" => function_answer(id, 0x0008, "0."),
                 other => match state.functions.get(other) {
                     Some((result_type, value)) => function_answer(id, *result_type, value),
+                    None if other == "PRACTICE.SD()" => function_answer(id, 0x0008, "0."),
                     None if other.starts_with("SYStem.Mode()") => {
                         let mode = if state.system_up { "0xB" } else { "0x0" };
                         function_answer(id, 0x0004, mode)

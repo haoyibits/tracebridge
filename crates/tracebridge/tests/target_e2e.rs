@@ -57,10 +57,11 @@ fn flash_runs_the_project_script_then_programs() {
     let root = project.root();
     let log = rcl.state().log.clone();
     let script = root.join("flash.cmm");
-    assert_eq!(log[0], "fnc SYStem.Up()");
-    assert_eq!(log[1], "fnc PRACTICE.SD()");
+    assert_eq!(log[0], "fnc PRACTICE.SD()");
+    assert_eq!(log[1], "fnc SYStem.Up()");
+    assert_eq!(log[2], "fnc PRACTICE.SD()");
     assert_eq!(
-        log[2],
+        log[3],
         format!("cmd DO \"{}\" PREPAREONLY", script.display())
     );
     let commands = rcl.state().commands();
@@ -82,13 +83,41 @@ fn flash_takes_an_up_system_down_before_the_script() {
     let output = project.run(&["flash"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let log = rcl.state().log.clone();
-    assert_eq!(log[0], "fnc SYStem.Up()");
-    assert_eq!(log[1], "cmd SYStem.Down");
-    assert!(log[3].starts_with("cmd DO "), "{log:?}");
+    assert_eq!(log[1], "fnc SYStem.Up()");
+    assert_eq!(log[2], "cmd SYStem.Down");
+    assert!(log[4].starts_with("cmd DO "), "{log:?}");
     assert!(
         stdout(&output).contains("target is up: SYStem.Down first"),
         "{}",
         stdout(&output)
+    );
+}
+
+#[test]
+fn flash_and_load_wait_for_a_running_script() {
+    let rcl = FakeRcl::start();
+    // A script on the PRACTICE stack, e.g. one t32mcp runs.
+    rcl.state()
+        .functions
+        .insert("PRACTICE.SD()".into(), (0x0008, "1.".into()));
+    let project = Project::new(rcl.port, "");
+    for action in ["flash", "load"] {
+        let output = project.run(&[action]);
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        let text = stderr(&output);
+        assert!(
+            text.contains(&format!("TRACE32 {action} failed: PowerView is busy")),
+            "{text}"
+        );
+    }
+    assert!(rcl.state().commands().is_empty());
+    assert!(
+        rcl.state()
+            .log
+            .iter()
+            .all(|line| line == "fnc PRACTICE.SD()"),
+        "{:?}",
+        rcl.state().log
     );
 }
 
@@ -154,7 +183,7 @@ fn flash_script_is_chosen_by_chip_from_the_library() {
         stdout(&output)
     );
     assert_eq!(
-        rcl.state().log[2],
+        rcl.state().log[3],
         format!(
             "cmd DO \"{}\" PREPAREONLY CPU=MYCHIP-A",
             library.join("board.cmm").display()

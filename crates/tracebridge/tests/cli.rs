@@ -121,6 +121,73 @@ fn colours_only_on_request_when_piped() {
 }
 
 #[test]
+fn skill_is_installed_without_a_configuration_and_reported_by_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = tracebridge(dir.path(), &["skill"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    // The test HOME is the temporary directory.
+    let skill = dir.path().join(".claude/skills/tracebridge/SKILL.md");
+    let text = std::fs::read_to_string(&skill).unwrap();
+    assert!(text.starts_with("---\nname: tracebridge\n"), "{text}");
+    assert!(stdout(&output).contains("installed"), "{}", stdout(&output));
+
+    let output = tracebridge(dir.path(), &["skill", "--dir", "agents"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(dir.path().join("agents/tracebridge/SKILL.md").is_file());
+
+    std::fs::write(
+        dir.path().join("trace32.toml"),
+        "[project]\nprogram = \"x\"\n",
+    )
+    .unwrap();
+    let config = stdout(&tracebridge(dir.path(), &["config"]));
+    assert!(
+        config.contains(&format!("skill   {}", skill.display())),
+        "{config}"
+    );
+    std::fs::write(
+        &skill,
+        "---\nname: tracebridge\nmetadata:\n  version: \"0.0.1\"\n---\n",
+    )
+    .unwrap();
+    let config = stdout(&tracebridge(dir.path(), &["config"]));
+    assert!(
+        config.contains("is from 0.0.1; run 'tracebridge skill'"),
+        "{config}"
+    );
+    std::fs::remove_file(&skill).unwrap();
+    let config = stdout(&tracebridge(dir.path(), &["config"]));
+    assert!(
+        config.contains("no agent skill; 'tracebridge skill' writes"),
+        "{config}"
+    );
+}
+
+#[test]
+fn config_warns_when_other_hosts_may_use_the_remote_api() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("trace32.toml"),
+        "[project]\nprogram = \"x\"\n[trace32]\nconfig = \"config.t32\"\n",
+    )
+    .unwrap();
+    let t32 = dir.path().join("config.t32");
+    std::fs::write(&t32, "PBI=\nUSB\n\nRCL=NETTCP\nPORT=20000\n").unwrap();
+    let text = stdout(&tracebridge(dir.path(), &["config"]));
+    assert!(
+        text.contains("WARN    config.t32 lets other hosts use the Remote API"),
+        "{text}"
+    );
+    std::fs::write(
+        &t32,
+        "PBI=\nUSB\n\nRCL=NETTCP\nPORT=20000\nREMOTEHOSTDENY\n",
+    )
+    .unwrap();
+    let text = stdout(&tracebridge(dir.path(), &["config"]));
+    assert!(!text.contains("WARN"), "{text}");
+}
+
+#[test]
 fn init_refuses_to_overwrite() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("trace32.toml"), "x").unwrap();

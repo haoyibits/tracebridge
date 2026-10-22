@@ -21,6 +21,7 @@ mod remote;
 mod rtt;
 mod rustrover;
 mod signals;
+mod skill;
 mod style;
 mod t32config;
 mod target;
@@ -92,6 +93,12 @@ enum Command {
     Vscode,
     /// Write a RustRover run configuration (needs the LSP4IJ plugin)
     Rustrover,
+    /// Install the AI agent skill: which work goes to tracebridge, which to t32mcp
+    Skill {
+        /// Skills directory (default: $CLAUDE_CONFIG_DIR/skills or ~/.claude/skills)
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
     /// Find the flash scripts for a chip (your library and the TRACE32 installation)
     Chips {
         /// Chip name or part of it, e.g. SR6P6 or STM32H743ZI (default: flash.chip or target.cpu)
@@ -154,6 +161,15 @@ fn run(cli: Cli) -> Result<i32> {
         return Ok(0);
     }
 
+    if let Command::Skill { dir } = &cli.command {
+        let dir = match dir {
+            Some(dir) => cwd.join(dir),
+            None => skill::default_dir(&pycompat::process_env()),
+        };
+        skill::install(&dir)?;
+        return Ok(0);
+    }
+
     // Help and usage errors of 'debug' need no configuration.
     if let Command::Debug { args } = &cli.command {
         if let Some(code) = debug::main_without_config(args) {
@@ -165,7 +181,7 @@ fn run(cli: Cli) -> Result<i32> {
     let config_file = find_config_file(cli.config.as_deref(), &cwd, &env)?;
     let mut config = load_config(&config_file, &env)?;
     match cli.command {
-        Command::Init => unreachable!(),
+        Command::Init | Command::Skill { .. } => unreachable!(),
         Command::Config => print_config(&config, &env),
         Command::Open => open(&config, None, &env)?,
         Command::Flash { chip, script } => {
@@ -402,28 +418,54 @@ fn print_config(config: &Config, env: &pycompat::Env) {
     if let Ok(exe) = ui::current_exe() {
         println!("  {} {}", style.label("exe    "), exe.display());
     }
+    let skill = skill::skill_file(&skill::default_dir(env));
+    match skill::installed_version(&skill) {
+        Some(version) if version == env!("CARGO_PKG_VERSION") => {
+            println!("  {} {}", style.label("skill  "), skill.display());
+        }
+        Some(version) => println!(
+            "  {} {} is from {version}; run 'tracebridge skill' to update it",
+            style.warn("WARN   "),
+            skill.display()
+        ),
+        None => println!(
+            "  {} no agent skill; 'tracebridge skill' writes {}",
+            style.label("note   "),
+            skill.display()
+        ),
+    }
     if config.t32_config.is_file() {
         let note = style.label("note   ");
         let warn = style.warn("WARN   ");
         match t32config::rcl_settings(&config.t32_config) {
             None => println!(
                 "  {note} config.t32 does not enable the Remote API; tracebridge adds \
-                 --t32-api-rcl=TCP:{} when it starts PowerView",
+                 --t32-api-rcl-remotehost=DENY --t32-api-rcl=TCP:{} when it starts PowerView",
                 config.rcl_port
             ),
-            Some(settings) if !settings.protocol.eq_ignore_ascii_case("NETTCP") => println!(
-                "  {warn} config.t32 has RCL={}; tracebridge needs RCL=NETTCP",
-                settings.protocol
-            ),
-            Some(settings) if settings.port != Some(config.rcl_port) => println!(
-                "  {warn} config.t32 PORT={} differs from trace32.rcl_port {}",
-                settings
-                    .port
-                    .map(|port| port.to_string())
-                    .unwrap_or_else(|| "(none)".into()),
-                config.rcl_port
-            ),
-            Some(_) => {}
+            Some(settings) => {
+                if !settings.protocol.eq_ignore_ascii_case("NETTCP") {
+                    println!(
+                        "  {warn} config.t32 has RCL={}; tracebridge needs RCL=NETTCP",
+                        settings.protocol
+                    );
+                } else if settings.port != Some(config.rcl_port) {
+                    println!(
+                        "  {warn} config.t32 PORT={} differs from trace32.rcl_port {}",
+                        settings
+                            .port
+                            .map(|port| port.to_string())
+                            .unwrap_or_else(|| "(none)".into()),
+                        config.rcl_port
+                    );
+                }
+                if !settings.remote_host_deny {
+                    println!(
+                        "  {warn} config.t32 lets other hosts use the Remote API, which can run \
+                         any command including OS.*; add REMOTEHOSTDENY to its RCL section"
+                    );
+                }
+            }
         }
     }
 }

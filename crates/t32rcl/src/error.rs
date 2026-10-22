@@ -25,6 +25,13 @@ pub enum Error {
     #[error("PRACTICE script did not finish within {0:?}")]
     ScriptTimeout(Duration),
 
+    /// `require_practice_idle` found a PRACTICE script on the stack (its depth).
+    #[error(
+        "PowerView is busy: a PRACTICE script is active (stack depth {0}), started in \
+         PowerView or by another client such as t32mcp; wait until it ends or end it, then retry"
+    )]
+    PracticeBusy(i128),
+
     /// TRACE32 answered with an error.
     #[error("{0}")]
     Trace32(Trace32Error),
