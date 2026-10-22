@@ -28,8 +28,11 @@ tracebridge 是 rustvisor（实际在用的是 `../rustvisor-sdk`，`../rustviso
 - **做什么由 rustvisor 的实际需要决定**：不为假想的其他用户泛化（不主动支持其他架构的 fault 解码、Windows 等），等真有第二块板或第二个用户再按需扩展。仓库照常开源、Homebrew 照常发布，但不当产品推广。
 - **划界**：
   - 放进 tracebridge：跟 TRACE32 或"项目加 TRACE32"的工作流有关，并且换一块用 TRACE32 的板子不改代码也能用（数据驱动）。
-  - 放进 rustvisor-sdk：rustvisor 自己的约定（诊断记录格式、镜像头检查、延迟统计、验收流程）。将来由 `rustvisor flash/run` 调用 tracebridge：rustvisor-sdk 的 `docs/design-plan.md` 第 7.5 节规定它们通过 board runner 工作，runner 写在板子的 `host/build.toml` 里。rustvisor 也可能用 StellarLINK 等其他调试器，那是另一个 runner，不进 tracebridge。这也是不把 tracebridge 并进 rustvisor-sdk 的原因。
+  - 放进 rustvisor-sdk：rustvisor 自己的约定（诊断记录格式、镜像头检查、延迟统计、验收流程）。验收脚本直接调用 tracebridge，用 `ELF`、`EXTRA_ELF`、`PROGRAM_NAME` 传入这次要烧的镜像。
   - 交给官方：AI 的通用调试（t32mcp，见第 9 阶段），以后的 IDE 集成看官方进展。
+- **名字不改**（2026-10-22）：曾考虑过 `t32run` 等名字，但决定做两个独立的 runner 之后，带 TRACE32 意味的 tracebridge 仍然合适。
+- **StellarLINK 是另一个独立的 runner**（2026-10-22，用户确认）：rustvisor 以后还要支持 StellarLINK，功能可能没这么全。它不做成 tracebridge 的后端，因为 tracebridge 从协议（t32rcl）、PowerView 启动、PRACTICE 求值、`.cmm` 烧录脚本到 DAP 代理都绑着 TRACE32，而 StellarLINK 很可能是 OpenOCD 加 GDB（SR6P6 上未确认），共用不了这些。能共用的只有分析部分：check 文件引擎、时钟树计算、ELF 比对、RTT 环形缓冲区、HSR 和 fault 解码，以及 check 文件和时钟描述的格式。这部分只需要"读某个地址的 32 位值、读核心寄存器"，等 StellarLINK 真正开工时再抽成共用的库，各自实现读取接口；两个工具的 `debug check`、`verify`、`clock` 保持同样的用法和 JSON。
+- **rustvisor-cli 和 runner 的关系还没定**：rustvisor-sdk 的 `docs/design-plan.md` 第 7.5 节规定 `rustvisor run/flash` 通过板子 `host/build.toml` 里声明的 runner 工作，但那是 tracebridge 出现、改用 Homebrew 分发之前写的，用户认为要重新考虑。rustvisor-cli 目前只是空架子。不要假设它会包装 tracebridge，也不要为它在 tracebridge 里加专门的接口。
 
 ## 新旧差异（这是重写的核心动机）
 Python 版假设工具包被复制进项目目录（config.py 的 TOOLKIT_DIR、trace32.toml 里的 root = ".."、install-vscode 最后执行 clean_toolkit）。新版是全局 CLI：
