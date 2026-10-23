@@ -298,9 +298,9 @@ id 回绕：… fe → 00 → 01
 | 8.3 BITFLD 文字、部分路径提示 | ✅ 离线测试，并用真实 persr6p6.per 抽查；用户要求修完直接发布（0.1.8），待硬件复测 | 见 git log |
 | 8.4 输出加颜色（先 debug，后其他命令） | ✅ 单测、e2e，并在 pty 里对着假 RCL 服务端跑过会话；0.1.9 已发布 | 见 git log |
 | 8.5 `debug clock` 时钟树 | ✅ 单测、e2e；SR6P6 描述文件用 SDK 默认配置的寄存器值离线核对过；0.1.10 在 SR6P6 上跑通；树形连线和 `--html` 在 0.1.11 发布；按模块的视图在 0.1.12 发布，用开发版对着真板生成过；来源视图的粗线和未选输入列表在 0.1.13 发布 | 见 git log |
-| 8.6 `extra_elf`：多个镜像同一次烧录、加载、核对 | ✅ 单测（命令序列、配置与环境变量、缺文件报错）；0.1.14 发布；还没在硬件上跑过（rustvisor S4b 用它烧 EL2 镜像加 Guest） | 见 git log |
-| 9 与官方 t32mcp 配合 | ✅ 单测、e2e；0.1.15 发布；Remote API 只监听本机、PowerView 忙时不动、`skill` 命令都还没在真 PowerView 上验证 | 见 git log |
-| 10 rustvisor 需要的通用功能（第一批） | ✅ 单测、CLI 测试；0.1.15 发布；`debug reset`、`debug do`、check 读时钟、HC15 回退都还没上板 | 见 git log |
+| 8.6 `extra_elf`：多个镜像同一次烧录、加载、核对 | ✅ 单测（命令序列、配置与环境变量、缺文件报错）；0.1.14 发布；rustvisor-sdk 的 S4b、S5 验收一直用它在 SR6P6 上同时烧 EL2 镜像和 Guest | 见 git log |
+| 9 与官方 t32mcp 配合 | ✅ 单测、e2e；0.1.15 发布；2026-10-23 在 SR6P6 上确认 Remote API 只监听本机、PowerView 忙时不动；`skill` 还没在新会话里试过 | 见 git log |
+| 10 rustvisor 需要的通用功能（第一批） | ✅ 单测、CLI 测试；0.1.15 发布；2026-10-23 在 SR6P6 上全部确认（`debug reset`、`debug do`、check 读时钟、HC15 回退） | 见 git log |
 
 **debug 的决定**（2026-09-29，任务说明是本地文件 `tracebridge-debug-prompt.md`，里面有项目数据，不提交；用户让我自己定这些点）：
 - 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`。
@@ -382,7 +382,7 @@ id 回绕：… fe → 00 → 01
 - **`debug reset`**（S）：`SYStem.Down`、`SYStem.RESet`，再按配置设 `SYStem.CPU`、`SYStem.MemAccess`、`CORE.ASSIGN`，然后 `SYStem.Mode Up` 和 `SYStem.JtagClock`（`target::reset_commands`）。顺序照 rustvisor-sdk 在板上验证过的序列，复位后核停在复位向量（它在 SR6P6 上读到 `0x29FB8100`）。原因：同一串命令手抄在 4 个脚本里，参数又和 `trace32.toml` 重复；`s3_design.md` 记录过一次漏了 `CORE.ASSIGN 1.`，结果 `SYStem.Mode Up` 报 "debug port fail"。`target.cpu` 为空时报错（`SYStem.RESet` 会清掉 CPU 设置）；有 PRACTICE 脚本在运行时拒绝执行（`probe::require_idle`，判断和提示与 flash/load 相同）。
 - **check 文件读时钟**：`read = { clock = "<名字>" }`，`expect` 可以写 `state`（"on"/"off"）、`hz`（误差半赫兹以内算相等，并隐含 on）、`source`、`warnings`（集合相等），至少写一项；这一组只能配 `read.clock`，数值类的 expect 不能配它。判断规则照抄 rustvisor-sdk 的 `clock_expect.py`，`s3_design.md` 里明确写了"tracebridge 若给 check 增加 `read = { clock = ... }`，这个脚本就可以去掉"。时钟树在 `--halt` 停核之后求一次，所有时钟检查共用；描述文件按芯片名查找，和 `debug clock` 相同，`[clock]` 频率也来自 `trace32.toml`。`--dry-run` 只检查时钟名是否在描述文件里。结果的值列显示文字（`on 400 MHz from PLL ! not locked`），JSON 里 `value` 是取整后的 Hz，`hex` 为空，另有 `text`。rustvisor-sdk 已于 2026-10-22 迁移：`s3.clock.toml` 改写成 check 文件，四个验收脚本改用 `debug check` 并另存 `debug clock --json` 作证据，`clock_expect.py` 删除。迁移前用它 `target/` 里以往上板保存的 58 份时钟 JSON 回放（假 RCL 服务端按 JSON 里的寄存器值应答，同一份数据分别交给旧脚本和 `debug check`），逐条结论和退出码一致；故意换成不对应的变体后也一致（都失败，退出码 3）。
 - **`debug do <脚本> [参数]`**（S）：`DO` 之后等脚本结束。原因：`debug cmd "DO …"` 在脚本一开始就返回，`irq_latency.sh` 紧接着发 `debug go`，两者的先后顺序没有保证。做法照 t32mcp：先 `ERROR.RESet`；轮询 `PRACTICE.SD()` 和 `T32_GetPracticeState`；连续两次"不在运行"才算停下；停在错误上（`ERROR.OCCURRED()`）就报告 `ERROR.MESSAGE()` 和 `ERROR.CMDLINE()`，用 `END` 结束脚本（最多 50 次，每次等 50 ms），再 `ERROR.RESet`；停在对话框或 `STOP` 上则保持不动，交给用户；超时（默认 `operation_timeout`，可用 `--timeout`）就让它继续跑。相对路径相对当前目录，`~~` 开头的原样传给 TRACE32。`T32_GetPracticeState` 是从 Python 库的 `t32_getpracticestate` 移植的 `t32rcl::Debugger::practice_state`（cmd 0x72、opt 0x03、无负载，应答按小端整数解析），请求字节由 `tools/reference_bytes.py` 用 Python 库生成后写进了单测。
-- **HC15 回退**：`probe::read_long` 读 `C15:` 且 op1 = 4 的寄存器失败（连接没断）时，改用 `HC15:` 再读一次；还失败就报告原来的错误。依据是 Arm 调试器手册（debugger_arm.pdf 的 "Coprocessors" 一节）：带 Hyp 模式的核上，Hyp 专用的 CP15 寄存器可以用 `HC15:` 读，"independent of the current core mode"。手册举的是 Cortex-A7/A15，**R52 上是否可行未验证**。背景：`s4_plan.md` 记录，核停在 EL1 时读 `C15:0x4011` 报 "bus error at address EC15:0x4011"，所以验收只能让 EL2 先把状态写进内存记录。只覆盖 `read_long`（`fault`、check 的 `addr`、时钟寄存器）；`reg` 走 `PER.VALUE`，没有回退。`fault` 读不到时会说明核停在什么模式，不再笼统地说"需要带 Hyp 模式的核"。
+- **HC15 回退**：`probe::read_long` 读 `C15:` 且 op1 = 4 的寄存器失败（连接没断）时，改用 `HC15:` 再读一次；还失败就报告原来的错误。依据是 Arm 调试器手册（debugger_arm.pdf 的 "Coprocessors" 一节）：带 Hyp 模式的核上，Hyp 专用的 CP15 寄存器可以用 `HC15:` 读，"independent of the current core mode"。手册举的是 Cortex-A7/A15；2026-10-23 在 SR6P6（Cortex-R52）上确认可行：核停在 EL1 时 `C15:0x4011` 报 bus error，`HC15:0x4011` 能读出 HCR，`fault` 也能给出报告。背景：`s4_plan.md` 记录，核停在 EL1 时读 `C15:0x4011` 报 "bus error at address EC15:0x4011"，所以验收只能让 EL2 先把状态写进内存记录。只覆盖 `read_long`（`fault`、check 的 `addr`、时钟寄存器）；`reg` 走 `PER.VALUE`，没有回退。`fault` 读不到时会说明核停在什么模式，不再笼统地说"需要带 Hyp 模式的核"。
 - **`config` 检查行号表**：ELF（包括 `extra_elf`）没有 `.debug_line` 时给 WARN（`debug/elf.rs` 的 `section_names`）。原因：用户问"为什么 List 窗口全是汇编，看不到 Rust 代码"，查下来 rustvisor-sdk 烧录的 release ELF 只有 `.symtab`，没有任何 `.debug_*` 节，因为 `[profile.release]` 没开调试信息。修法在 rustvisor-sdk：`[profile.release] debug = true`（只影响 ELF 文件，不改变烧进去的代码）。tracebridge 只负责提示。
 - **第二批（还没做）**：大块读内存（`debug mem` 最多 4096 个字，而且逐字用 `Data.Long`）、导出 trace（`Trace.EXPORT.Ascii` 解析成 JSON）、版本要求和未知配置项告警（旧版会静默忽略 `extra_elf`，用它烧录会擦掉 Guest）。多核（`--core`、多核 `CORE.ASSIGN`）等 rustvisor S5 的 C、D 段再做。
 
@@ -395,7 +395,8 @@ id 回绕：… fe → 00 → 01
 - **为什么要 bottle**：没有 bottle 时，Homebrew 会把安装当成从源码构建，要求 Command Line Tools 是最新版本（2026-09-22 在 macOS 27 + CLT 26 上实际遇到过）。有了 bottle 就直接解包安装，不需要 CLT。
 - Release 开始时会检查 tag 与 Cargo.toml 的版本号是否一致。
 
-### 手动验证清单（需要真实 PowerView/硬件，均未验证）
+### 手动验证清单（需要真实 PowerView/硬件）
+标了 ✅ 的已经在硬件上确认，其余没有记录。
 1. **t32rcl 对照**：PowerView 运行时，分别执行 `cargo run -p t32rcl --example smoke -- --address E:0x<RAM> --length 32` 和 `python3 crates/t32rcl/tools/smoke.py --address E:0x<RAM> --length 32`，两边输出应完全一致。
 2. **真实抓包 fixture**：先运行 `cargo run -p t32rcl --example capture_proxy -- --out crates/t32rcl/tests/fixtures/powerview`，再运行 `python3 crates/t32rcl/tools/capture_session.py --port 20001 --session crates/t32rcl/tests/fixtures/powerview/session.txt --address E:0x<RAM> --symbol '\\<program>\Global\_SEGGER_RTT'`，最后 `cargo test -p t32rcl --test replay`。
 3. **open 冷启动**：没有 PowerView 时执行 `tracebridge open`。PowerView 应能启动，`.tracebridge/powerview.log` 有内容，工具栏多出 Flash/Load ELF 两个按钮。
@@ -406,16 +407,16 @@ id 回绕：… fe → 00 → 01
 8. **VS Code**：执行 `tracebridge vscode` 后按 F5，检查断点、单步、Restart、Locals 为空、停止调试后代理退出。
 9. **RustRover**：装好 LSP4IJ 后执行 `tracebridge rustrover`，确认运行配置出现，Debug 能启动代理并连上，`.c` 文件里能打断点。**serverMappings 的 XML 格式是按 IntelliJ 序列化规则推断的**，如果不生效，就在 Mappings 页手动添加文件名模式。
 10. **RTT**：在真实目标上检查输出、键盘输入，Ctrl-C 后终端恢复正常。
-11. **发布**：推一个 tag，检查 4 个产物和 sha256。确认仓库名 `haoyibits/tracebridge`（install.sh 和 README 里的默认值是按 git 作者名假设的），再用 install.sh 从 GitHub 安装一次。
-12. **debug**：`tracebridge-debug-prompt.md` 里的硬件验收表，以及其中 5 条未确认事项（PER 路径解析、字段名匹配、歧义报告、`SYStem.Mode()` 编码、`/DIFF` 按 LMA 比较）。
+11. **发布**：推一个 tag，检查 4 个产物和 sha256。确认仓库名 `haoyibits/tracebridge`（install.sh 和 README 里的默认值是按 git 作者名假设的），再用 install.sh 从 GitHub 安装一次。 ✅ 0.1.x 各版本都按这个流程发布，Homebrew tap 跟着更新。
+12. **debug**：`tracebridge-debug-prompt.md` 里的硬件验收表，以及其中 5 条未确认事项（PER 路径解析、字段名匹配、歧义报告、`SYStem.Mode()` 编码、`/DIFF` 按 LMA 比较）。 ✅ 2026-09-29 在 SR6P6 上跑完验收表，全部通过（见进度表第 8 阶段）。
 13. **flash 先 Down**：PowerView 处于 Up、核停在应用里时执行 `tracebridge flash`，应该打印 `target is up: SYStem.Down first`，并且烧录成功。
-14. **Remote API 只监听本机**：config.t32 加上 `REMOTEHOSTDENY` 并重启 PowerView 后，`lsof -nP -iTCP:20000 -sTCP:LISTEN` 应显示 `127.0.0.1:20000`，`tracebridge flash`、IDE 调试和 t32mcp 照常能连上。没有 RCL 段时，`tracebridge open` 启动的 PowerView 也应只监听 127.0.0.1。
-15. **PowerView 忙时不动**：在 PowerView 里运行一个停在 `STOP` 或对话框里的脚本，然后执行 `tracebridge flash`，应报 `PowerView is busy`，并且 PowerView 的状态没有变化；脚本结束后再执行，应正常烧录。同样试一次 t32mcp 正在跑脚本的情况。
+14. **Remote API 只监听本机**：config.t32 加上 `REMOTEHOSTDENY` 并重启 PowerView 后，`lsof -nP -iTCP:20000 -sTCP:LISTEN` 应显示 `127.0.0.1:20000`，`tracebridge flash`、IDE 调试和 t32mcp 照常能连上。没有 RCL 段时，`tracebridge open` 启动的 PowerView 也应只监听 127.0.0.1。 ✅ 2026-10-23：config.t32 加 `REMOTEHOSTDENY` 后 PowerView 只监听 `127.0.0.1:20000`，tracebridge 和 t32mcp 都能连上。没有 RCL 段、由 `open` 加参数的情况还没试。
+15. **PowerView 忙时不动**：在 PowerView 里运行一个停在 `STOP` 或对话框里的脚本，然后执行 `tracebridge flash`，应报 `PowerView is busy`，并且 PowerView 的状态没有变化；脚本结束后再执行，应正常烧录。同样试一次 t32mcp 正在跑脚本的情况。 ✅ 2026-10-23：PowerView 里有停在 `STOP` 的脚本时，`flash`、`load`、`debug reset`、`debug do` 都报 `PowerView is busy`，什么都没发；t32mcp 正在跑脚本时同样拒绝。反过来 tracebridge 跑脚本时 t32mcp 也报忙（这要先修好 t32mcp 0.3.0 在 macOS 上的 `O_NONBLOCK` 错误，已向官方提交 issue 和 MR）。
 16. **skill**：执行 `tracebridge skill` 后开一个新的 Claude Code 会话，让它"烧录并读 HSR"，应该用 `tracebridge flash` 烧录，用 `tracebridge debug reg` 读寄存器，停核等通用操作用 t32mcp。
-17. **HC15**：让 Guest 停在 `wfi`（EL1），执行 `tracebridge debug eval "Data.Long(HC15:0x4011)"`，应读出 HCR；再执行 `tracebridge debug fault`，应能给出报告。读不出来就记下报错，并在第 10 阶段的说明里改成"不可行"。
-18. **`debug reset`**：在 rustvisor-sdk 里，用 `tracebridge debug reset` 替换 `reset_check` 里那 7 条 `debug cmd`，跑 `s5_acceptance.sh reset`，结果应和原来一样（核停在 `0x29FB8100`，复位检查全部通过）。
-19. **`debug do`**：跑一个正常结束的脚本、一个有错误命令的脚本、一个停在 `DIALOG.YESNO` 的脚本，分别应报告结束、报错并结束脚本、提示去 PowerView 处理。
-20. **check 读时钟**：rustvisor-sdk 已迁移，离线回放 58 份以往的时钟 JSON 结论一致。还差在板上跑一次 `s5_acceptance.sh`（或 `s3_acceptance.sh`），时钟检查应和以往记录的结果一致。
+17. **HC15**：让 Guest 停在 `wfi`（EL1），执行 `tracebridge debug eval "Data.Long(HC15:0x4011)"`，应读出 HCR；再执行 `tracebridge debug fault`，应能给出报告。读不出来就记下报错，并在第 10 阶段的说明里改成"不可行"。 ✅ 2026-10-23：Guest 停在 EL1（svc），`C15:0x4011` 报 bus error，`HC15:` 能读出 HCR、HSR、VSCTLR、HVBAR；`debug fault` 给出报告，HVBAR 指向 `__el2_vectors_diagnostic`。
+18. **`debug reset`**：在 rustvisor-sdk 里，用 `tracebridge debug reset` 替换 `reset_check` 里那 7 条 `debug cmd`，跑 `s5_acceptance.sh reset`，结果应和原来一样（核停在 `0x29FB8100`，复位检查全部通过）。 ✅ 2026-10-23：`debug reset` 后核停在 `0x29FB8100`，复位检查 11/11、2/2 通过，时钟检查 14/14。
+19. **`debug do`**：跑一个正常结束的脚本、一个有错误命令的脚本、一个停在 `DIALOG.YESNO` 的脚本，分别应报告结束、报错并结束脚本、提示去 PowerView 处理。 ✅ 2026-10-23：正常结束、出错（报告错误并结束脚本）、停在 `STOP`（提示去 PowerView 处理）三种情况都对。`DIALOG.YESNO` 没有单独试。
+20. **check 读时钟**：rustvisor-sdk 已迁移，离线回放 58 份以往的时钟 JSON 结论一致。还差在板上跑一次 `s5_acceptance.sh`（或 `s3_acceptance.sh`），时钟检查应和以往记录的结果一致。 ✅ 2026-10-23：`s5_acceptance.sh -y all` 全部 ok（含 reset 和时钟检查）。
 
 ### 阶段 0：通读和规划 ✅（本文档）
 
