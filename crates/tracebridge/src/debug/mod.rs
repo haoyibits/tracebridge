@@ -15,6 +15,7 @@ mod elf;
 mod perfile;
 mod probe;
 mod repl;
+mod trace;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -78,7 +79,17 @@ pub enum DebugCommand {
         count: u32,
     },
     /// [R] AArch32 Hyp fault report: vector slot, HSR decoded, HDFAR/HIFAR, ELR_hyp, SPSR_hyp
-    Fault,
+    Fault {
+        /// Also list the newest trace records (default 32): how the core got there
+        #[arg(long, value_name = "RECORDS", num_args = 0..=1, default_missing_value = "32")]
+        trace: Option<u32>,
+    },
+    /// [R] The newest records of the trace set up in PowerView, with cycle counts and symbols
+    Trace {
+        /// Number of records, newest last
+        #[arg(long, default_value_t = 100, value_name = "RECORDS")]
+        last: u32,
+    },
     /// [R] Print the value of a PRACTICE expression
     Eval {
         #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true)]
@@ -133,6 +144,15 @@ pub enum DebugCommand {
     Break,
     /// [S] Resume the core
     Go,
+    /// [S] Run a halted core until it reaches an address or symbol (temporary on-chip breakpoint)
+    RunUntil {
+        /// Seconds to wait (default: trace32.operation_timeout)
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<u64>,
+        /// A symbol, symbol+offset, a classified address (P:0x1000), a hex address, or \module\line
+        #[arg(value_name = "SYMBOL|ADDRESS")]
+        target: String,
+    },
     /// [S] Run a PRACTICE script (DO) and wait until it ends; one that stops at an error is ended
     Do {
         /// Seconds to wait (default: trace32.operation_timeout)
@@ -164,7 +184,8 @@ impl DebugCommand {
             DebugCommand::Status => "status",
             DebugCommand::Reg { .. } => "reg",
             DebugCommand::Mem { .. } => "mem",
-            DebugCommand::Fault => "fault",
+            DebugCommand::Fault { .. } => "fault",
+            DebugCommand::Trace { .. } => "trace",
             DebugCommand::Eval { .. } => "eval",
             DebugCommand::Verify { .. } => "verify",
             DebugCommand::Check { .. } => "check",
@@ -175,6 +196,7 @@ impl DebugCommand {
             DebugCommand::Down => "down",
             DebugCommand::Break => "break",
             DebugCommand::Go => "go",
+            DebugCommand::RunUntil { .. } => "run-until",
             DebugCommand::Do { .. } => "do",
             DebugCommand::Cmd { .. } => "cmd",
             DebugCommand::Reconnect => "reconnect",
@@ -258,7 +280,8 @@ pub fn execute(ctx: &mut Context, command: &DebugCommand) -> DResult<Outcome> {
         DebugCommand::Status => commands::status(ctx),
         DebugCommand::Reg { names } => commands::reg(ctx, names),
         DebugCommand::Mem { location, count } => commands::mem(ctx, location, *count),
-        DebugCommand::Fault => commands::fault(ctx),
+        DebugCommand::Fault { trace } => commands::fault(ctx, *trace),
+        DebugCommand::Trace { last } => commands::trace(ctx, *last),
         DebugCommand::Eval { expression } => commands::eval(ctx, &expression.join(" ")),
         DebugCommand::Verify { elf, t32 } => commands::verify(ctx, elf.as_deref(), *t32),
         DebugCommand::Check {
@@ -284,6 +307,11 @@ pub fn execute(ctx: &mut Context, command: &DebugCommand) -> DResult<Outcome> {
         DebugCommand::Down => commands::command(ctx, "SYStem.Down", "SYStem.Down done"),
         DebugCommand::Break => commands::command(ctx, "Break", "halted"),
         DebugCommand::Go => commands::command(ctx, "Go", "running"),
+        DebugCommand::RunUntil { timeout, target } => commands::run_until(
+            ctx,
+            target,
+            Duration::from_secs(timeout.unwrap_or(ctx.config.operation_timeout)),
+        ),
         DebugCommand::Do {
             timeout,
             script,
@@ -459,6 +487,30 @@ mod tests {
         assert!(!json);
         let (cli, _) = parse(args("exit")).unwrap();
         assert_eq!(cli.command, Some(DebugCommand::Quit));
+    }
+
+    #[test]
+    fn parses_trace_options() {
+        let (cli, _) = parse(args("fault")).unwrap();
+        assert_eq!(cli.command, Some(DebugCommand::Fault { trace: None }));
+        let (cli, _) = parse(args("fault --trace")).unwrap();
+        assert_eq!(cli.command, Some(DebugCommand::Fault { trace: Some(32) }));
+        let (cli, json) = parse(args("fault --trace 8 --json")).unwrap();
+        assert!(json);
+        assert_eq!(cli.command, Some(DebugCommand::Fault { trace: Some(8) }));
+        let (cli, _) = parse(args("trace")).unwrap();
+        assert_eq!(cli.command, Some(DebugCommand::Trace { last: 100 }));
+        let (cli, _) = parse(args("trace --last 5")).unwrap();
+        assert_eq!(cli.command, Some(DebugCommand::Trace { last: 5 }));
+        let (cli, _) = parse(args("run-until main --timeout 3")).unwrap();
+        assert_eq!(
+            cli.command,
+            Some(DebugCommand::RunUntil {
+                timeout: Some(3),
+                target: "main".into()
+            })
+        );
+        assert!(parse(args("run-until")).is_err());
     }
 
     #[test]

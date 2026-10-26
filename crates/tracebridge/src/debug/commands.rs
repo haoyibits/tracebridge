@@ -17,6 +17,7 @@ use super::probe::{
     SymbolRef, TargetAddress, eval_u64, fail, format_value, hex32, read_long, running_error,
     symbolize, value_as_u64,
 };
+use super::trace;
 use super::{EXIT_FAILED, Outcome};
 use crate::config::Config;
 use crate::style::Style;
@@ -418,8 +419,9 @@ struct OtherTable {
     symbol: String,
 }
 
-/// R: Armv7/Armv8-R AArch32 Hyp fault report.
-pub fn fault(ctx: &mut Context) -> DResult<Outcome> {
+/// R: Armv7/Armv8-R AArch32 Hyp fault report, followed by the newest
+/// `trace_records` trace records when given: the way into the exception.
+pub fn fault(ctx: &mut Context, trace_records: Option<u32>) -> DResult<Outcome> {
     let style = ctx.style;
     let probe = &mut *ctx.probe;
     if let Some(Value::Bool(true)) = optional(probe.fnc("CPUIS64BIT()"))? {
@@ -572,9 +574,7 @@ pub fn fault(ctx: &mut Context) -> DResult<Outcome> {
         spsr_decoded.describe()
     ));
 
-    Ok(Outcome::ok(
-        lines.join("\n"),
-        json!({
+    let mut report = json!({
             "pc": {"value": pc, "hex": hex32(pc), "symbol": symbol_json(&pc_symbol)},
             "hvbar": {"value": hvbar, "hex": hex32(hvbar), "symbol": symbol_json(&hvbar_symbol)},
             "vector": slot.map(|(offset, name)| json!({"offset": offset, "name": name})),
@@ -595,8 +595,29 @@ pub fn fault(ctx: &mut Context) -> DResult<Outcome> {
             "hifar": {"value": hifar, "hex": hex32(hifar)},
             "elr_hyp": {"value": elr, "hex": hex32(elr), "symbol": symbol_json(&elr_symbol)},
             "spsr_hyp": spsr_decoded.to_json(),
-        }),
-    ))
+    });
+
+    // The way into the fault, when asked for. A trace that cannot be read
+    // does not hide the report: the reason is shown in its place.
+    if let Some(last) = trace_records {
+        lines.push(style.label("trace"));
+        match trace_dump(probe, ctx.config, last) {
+            Ok(dump) => {
+                lines.extend(
+                    dump.lines(style)
+                        .into_iter()
+                        .map(|line| format!("  {line}")),
+                );
+                report["trace"] = dump.to_json();
+            }
+            Err(error) if error.lost => return Err(error),
+            Err(error) => {
+                lines.push(format!("  {}", style.warn(format!("unavailable: {error}"))));
+                report["trace"] = json!({"error": error.message});
+            }
+        }
+    }
+    Ok(Outcome::ok(lines.join("\n"), report))
 }
 
 // ---------------------------------------------------------------- R: eval
@@ -1073,6 +1094,131 @@ pub fn run_script(
     after_change(ctx, "script ended", &command)
 }
 
+/// How often `run-until` asks whether the core has stopped.
+const RUN_UNTIL_POLL: Duration = Duration::from_millis(50);
+
+/// The address `run-until` stops at, as TRACE32 takes it: a symbol, a
+/// classified address (`P:0x28010570`), `symbol+0x10`, a source line
+/// (`\module\120`), or a bare hexadecimal number, which is given class `P:`.
+fn breakpoint_address(target: &str) -> String {
+    let target = target.trim();
+    let hex = target
+        .strip_prefix("0x")
+        .or_else(|| target.strip_prefix("0X"));
+    match hex {
+        Some(digits) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            format!("P:{target}")
+        }
+        _ => target.to_string(),
+    }
+}
+
+/// S: set a temporary on-chip breakpoint at `target` and run until the core
+/// stops (`Go.direct <target> /Onchip`). TRACE32 deletes the breakpoint when
+/// the core next stops. On-chip, so that it works in flash as well as in RAM.
+/// A core that stops elsewhere (another breakpoint, a fault vector, a
+/// `break`) gives exit code 3 with where it stopped; one that has not stopped
+/// within `timeout` keeps running, its temporary breakpoint still set.
+pub fn run_until(ctx: &mut Context, target: &str, timeout: Duration) -> DResult<Outcome> {
+    let style = ctx.style;
+    let address_text = breakpoint_address(target);
+    if address_text.is_empty() {
+        fail!("no address given");
+    }
+    let probe = &mut *ctx.probe;
+    if probe::core_running(probe)? {
+        fail!(
+            "the core is running; run-until starts a halted core, {}",
+            probe::HALT_HINT
+        );
+    }
+    let address = eval_u64(probe, &format!("ADDRESS.OFFSET({address_text})")).map_err(|error| {
+        if error.lost {
+            error
+        } else {
+            error.context(format!("cannot resolve {target} to an address"))
+        }
+    })?;
+    let command = format!("Go.direct {address_text} /Onchip");
+    probe
+        .cmd(&command)
+        .map_err(|error| DebugError::from(error).context(&command))?;
+    ctx.per.invalidate();
+    let probe = &mut *ctx.probe;
+    let start = Instant::now();
+    while probe::core_running(probe)? {
+        if start.elapsed() > timeout {
+            fail!(
+                "{target} was not reached within {}s; the core keeps running and the temporary \
+                 breakpoint stays set until it next stops ('tracebridge debug break' halts it)",
+                timeout.as_secs()
+            );
+        }
+        std::thread::sleep(RUN_UNTIL_POLL);
+    }
+    let waited = start.elapsed();
+    let pc = eval_u64(probe, "Register(PP)")?;
+    let pc_symbol = symbolize(probe, pc)?;
+    let reached = pc == address;
+    let target_text = format!("{} ({})", style.symbol(target), hex32(address));
+    let text = if reached {
+        format!(
+            "{} {target_text} after {} ms",
+            style.good("reached"),
+            waited.as_millis()
+        )
+    } else {
+        format!(
+            "{} at {}, not at {target_text}; the temporary breakpoint is gone",
+            style.bad("stopped"),
+            with_symbol(style, pc, &pc_symbol)
+        )
+    };
+    Ok(Outcome {
+        text,
+        json: json!({
+            "target": target,
+            "address": address,
+            "hex": hex32(address),
+            "reached": reached,
+            "waited_ms": waited.as_millis() as u64,
+            "command": command,
+            "pc": {"value": pc, "hex": hex32(pc), "symbol": symbol_json(&pc_symbol)},
+        }),
+        code: if reached { 0 } else { EXIT_FAILED },
+    })
+}
+
+// --------------------------------------------------------------- R: trace
+
+/// The trace dump for `trace` and `fault --trace`: the core must be halted,
+/// because the trace is exported only once it has stopped recording.
+fn trace_dump(probe: &mut dyn Probe, config: &Config, last: u32) -> DResult<trace::Dump> {
+    if probe::core_running(probe)? {
+        fail!(
+            "the core is running and the trace still records; {}",
+            probe::HALT_HINT
+        );
+    }
+    config
+        .ensure_run_dir()
+        .map_err(|error| DebugError::new(error.0))?;
+    trace::read(probe, &config.run_dir, last)
+}
+
+/// R: the newest records of the trace PowerView has recorded.
+pub fn trace(ctx: &mut Context, last: u32) -> DResult<Outcome> {
+    let dump = trace_dump(ctx.probe, ctx.config, last)?;
+    let mut lines = dump.lines(ctx.style);
+    lines.push(ctx.style.dim(format!(
+        "{} of {} records; cycles since the previous record; export in {}",
+        dump.records.len(),
+        dump.available,
+        dump.file.display()
+    )));
+    Ok(Outcome::ok(lines.join("\n"), dump.to_json()))
+}
+
 /// S: `SYStem.Down`, `Break`, `Go` or any command.
 pub fn command(ctx: &mut Context, command: &str, done: &str) -> DResult<Outcome> {
     if command.trim().is_empty() {
@@ -1134,7 +1280,7 @@ mod tests {
             "{text}"
         );
 
-        let text = coloured(halted_hyp_probe, fault);
+        let text = coloured(halted_hyp_probe, |ctx| fault(ctx, None));
         assert!(text.contains("\x1b[1;31m\"data abort\"\x1b[0m"), "{text}");
         assert!(
             text.contains(
@@ -1254,7 +1400,7 @@ mod tests {
     #[test]
     fn fault_report_via_the_active_table() {
         let mut probe = halted_hyp_probe();
-        let outcome = run(&mut probe, fault).unwrap();
+        let outcome = run(&mut probe, |ctx| fault(ctx, None)).unwrap();
         let text = &outcome.text;
         assert!(
             text.contains("hyp vector \"data abort\": HVBAR 0x00001020 (vectors_b) + 0x10"),
@@ -1283,7 +1429,7 @@ mod tests {
             "ADDRESS.OFFSET(sYmbol.BEGIN(\\\\app\\Global\\vectors_a))",
             Value::Int(0xF00),
         );
-        let outcome = run(&mut probe, fault).unwrap();
+        let outcome = run(&mut probe, |ctx| fault(ctx, None)).unwrap();
         assert!(
             outcome.text.contains(
                 "\"data abort\" entry of vectors_b at 0x00001020, which is NOT the active table \
@@ -1304,7 +1450,7 @@ mod tests {
             "Data.Long(C15:0x4025)".into(),
             "bus error at address EC15:0x4025".into(),
         );
-        let error = run(&mut probe, fault).unwrap_err();
+        let error = run(&mut probe, |ctx| fault(ctx, None)).unwrap_err();
         assert!(
             error.message.starts_with(
                 "cannot read HSR (C15:0x4025): the core is halted in svc mode, not in Hyp mode"
@@ -1319,7 +1465,7 @@ mod tests {
 
         // HC15 reads it: the report is made from EL1.
         probe.set("Data.Long(HC15:0x4025)", Value::Int(0x9200_004C));
-        let outcome = run(&mut probe, fault).unwrap();
+        let outcome = run(&mut probe, |ctx| fault(ctx, None)).unwrap();
         assert!(
             outcome.text.contains("HSR       0x9200004C"),
             "{}",
@@ -1331,7 +1477,7 @@ mod tests {
     fn fault_refuses_a_running_core() {
         let mut probe = halted_hyp_probe();
         probe.set("STATE.RUN()", Value::Bool(true));
-        let error = run(&mut probe, fault).unwrap_err();
+        let error = run(&mut probe, |ctx| fault(ctx, None)).unwrap_err();
         assert!(
             error
                 .message
@@ -1622,7 +1768,7 @@ mod tests {
             "ADDRESS.OFFSET(sYmbol.BEGIN(\\\\app\\Global\\__record_start))",
             Value::Int(0x29F8_7E00),
         );
-        let outcome = run(&mut probe, fault).unwrap();
+        let outcome = run(&mut probe, |ctx| fault(ctx, None)).unwrap();
         let text = &outcome.text;
         assert!(
             text.contains("HSR       0x00000000  HSR = 0: no exception recorded"),
@@ -1889,5 +2035,271 @@ mod tests {
                 .text
                 .ends_with("MISMATCH: 1 bytes differ, first at AD:0x00000489")
         );
+    }
+
+    /// A halted core whose `main` is at 0x1000, with a symbol for it.
+    fn halted_at_main() -> FakeProbe {
+        let mut probe = FakeProbe::with(&[
+            ("ADDRESS.OFFSET(main)", Value::Int(0x1000)),
+            ("ADDRESS.OFFSET(P:0x28010570)", Value::Int(0x2801_0570)),
+            (
+                "sYmbol.NAME(P:0x1000)",
+                Value::Text("\\\\app\\Global\\main".into()),
+            ),
+            (
+                "ADDRESS.OFFSET(sYmbol.BEGIN(\\\\app\\Global\\main))",
+                Value::Int(0x1000),
+            ),
+            (
+                "ADDRESS.OFFSET(sYmbol.END(\\\\app\\Global\\main))",
+                Value::Int(0x103F),
+            ),
+            (
+                "sYmbol.NAME(P:0x1010)",
+                Value::Text("\\\\app\\Global\\main".into()),
+            ),
+            ("Register(PP)", Value::Int(0x1000)),
+        ]);
+        // Halted before Go, running after it, then stopped.
+        probe.queue(
+            "STATE.RUN()",
+            &[Value::Bool(false), Value::Bool(true), Value::Bool(true)],
+        );
+        probe.set("STATE.RUN()", Value::Bool(false));
+        probe
+    }
+
+    #[test]
+    fn run_until_stops_at_the_symbol_with_an_onchip_breakpoint() {
+        let mut probe = halted_at_main();
+        let outcome = run(&mut probe, |ctx| {
+            run_until(ctx, "main", Duration::from_secs(5))
+        })
+        .unwrap();
+        assert_eq!(outcome.code, 0);
+        assert!(
+            outcome.text.starts_with("reached main (0x00001000) after "),
+            "{}",
+            outcome.text
+        );
+        assert_eq!(outcome.json["reached"], true);
+        assert_eq!(outcome.json["pc"]["symbol"]["name"], "main");
+        assert_eq!(probe.commands(), ["Go.direct main /Onchip"]);
+    }
+
+    #[test]
+    fn run_until_takes_a_bare_hex_address_as_a_program_address() {
+        assert_eq!(breakpoint_address(" 0x28010570 "), "P:0x28010570");
+        assert_eq!(breakpoint_address("P:0x28010570"), "P:0x28010570");
+        assert_eq!(breakpoint_address("main+0x10"), "main+0x10");
+        assert_eq!(breakpoint_address("\\latency\\255"), "\\latency\\255");
+        let mut probe = halted_at_main();
+        probe.set("Register(PP)", Value::Int(0x2801_0570));
+        let outcome = run(&mut probe, |ctx| {
+            run_until(ctx, "0x28010570", Duration::from_secs(5))
+        })
+        .unwrap();
+        assert_eq!(outcome.code, 0, "{}", outcome.text);
+        assert_eq!(probe.commands(), ["Go.direct P:0x28010570 /Onchip"]);
+    }
+
+    #[test]
+    fn run_until_reports_a_stop_elsewhere_with_exit_code_3() {
+        let mut probe = halted_at_main();
+        probe.set("Register(PP)", Value::Int(0x1010));
+        let outcome = run(&mut probe, |ctx| {
+            run_until(ctx, "main", Duration::from_secs(5))
+        })
+        .unwrap();
+        assert_eq!(outcome.code, EXIT_FAILED);
+        assert_eq!(
+            outcome.text,
+            "stopped at 0x00001010  main+0x10, not at main (0x00001000); the temporary \
+             breakpoint is gone"
+        );
+        assert_eq!(outcome.json["reached"], false);
+    }
+
+    #[test]
+    fn run_until_refuses_a_running_core_and_unknown_symbols() {
+        let mut probe = halted_at_main();
+        probe.queued.clear();
+        probe.set("STATE.RUN()", Value::Bool(true));
+        let error = run(&mut probe, |ctx| {
+            run_until(ctx, "main", Duration::from_secs(5))
+        })
+        .unwrap_err();
+        assert!(
+            error.message.contains("the core is running"),
+            "{}",
+            error.message
+        );
+        assert!(probe.commands().is_empty());
+
+        let mut probe = halted_at_main();
+        let error = run(&mut probe, |ctx| {
+            run_until(ctx, "nope", Duration::from_secs(5))
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .message
+                .starts_with("cannot resolve nope to an address: "),
+            "{}",
+            error.message
+        );
+        assert!(probe.commands().is_empty());
+    }
+
+    #[test]
+    fn run_until_leaves_the_core_running_after_the_timeout() {
+        let mut probe = halted_at_main();
+        probe.queued.clear();
+        probe.queue("STATE.RUN()", &[Value::Bool(false)]);
+        probe.set("STATE.RUN()", Value::Bool(true));
+        let error = run(&mut probe, |ctx| run_until(ctx, "main", Duration::ZERO)).unwrap_err();
+        assert!(
+            error
+                .message
+                .starts_with("main was not reached within 0s; the core keeps running"),
+            "{}",
+            error.message
+        );
+        assert_eq!(probe.commands(), ["Go.direct main /Onchip"]);
+    }
+
+    /// Three records of an export, one of them without a symbol, and a line
+    /// that is not a record.
+    const EXPORT: &str = "\
+-00000000000003     HT:00001000               677951. *\\main
+ ldr     r0,[r13]
+-00000000000002     HT:00001010        33.    677984. *\\main+0x10
+-00000000000001     ST:00009000         5.    677989. *unknown
+";
+
+    fn traced(probe: &mut FakeProbe) {
+        probe.set("Trace.RECORDS()", Value::Int(2981));
+        probe
+            .exports
+            .insert("Trace.EXPORT.Ascii".into(), EXPORT.into());
+    }
+
+    #[test]
+    fn trace_exports_the_newest_records_and_names_their_symbols() {
+        let mut probe = halted_at_main();
+        probe.queued.clear();
+        traced(&mut probe);
+        let outcome = run(&mut probe, |ctx| trace(ctx, 3)).unwrap();
+        let commands = probe.commands();
+        assert_eq!(commands.len(), 1);
+        assert!(
+            commands[0].starts_with("Trace.EXPORT.Ascii \""),
+            "{}",
+            commands[0]
+        );
+        assert!(
+            commands[0].ends_with(
+                "/.tracebridge/trace.ad\" (-3.)--(-1.) Address CLOCKS.Back CLOCKS.Zero sYmbol \
+                 List.NoDummy /ShowRecord"
+            ),
+            "{}",
+            commands[0]
+        );
+        let lines: Vec<&str> = outcome.text.lines().collect();
+        assert_eq!(lines[0], "-3  HT:00001000       -  main");
+        assert_eq!(lines[1], "-2  HT:00001010      33  main+0x10");
+        assert_eq!(lines[2], "-1  ST:00009000       5  (no symbol)");
+        assert!(lines[3].starts_with("3 of 2981 records; "), "{}", lines[3]);
+        let records = &outcome.json["records"];
+        assert_eq!(records.as_array().unwrap().len(), 3);
+        assert_eq!(records[1]["clocks_back"], 33);
+        assert_eq!(records[1]["clocks_zero"], 677_984);
+        assert_eq!(records[1]["symbol"]["text"], "main+0x10");
+        assert_eq!(records[2]["symbol"], serde_json::Value::Null);
+        assert_eq!(outcome.json["available"], 2981);
+    }
+
+    #[test]
+    fn trace_never_asks_for_more_records_than_there_are() {
+        let mut probe = halted_at_main();
+        probe.queued.clear();
+        traced(&mut probe);
+        probe.set("Trace.RECORDS()", Value::Int(2));
+        run(&mut probe, |ctx| trace(ctx, 100)).unwrap();
+        assert!(
+            probe.commands()[0].contains(" (-2.)--(-1.) "),
+            "{:?}",
+            probe.commands()
+        );
+    }
+
+    #[test]
+    fn trace_explains_an_empty_or_running_trace() {
+        let mut probe = halted_at_main();
+        probe.queued.clear();
+        probe.set("Trace.RECORDS()", Value::Int(0));
+        let error = run(&mut probe, |ctx| trace(ctx, 10)).unwrap_err();
+        assert!(
+            error.message.starts_with("the trace is empty"),
+            "{}",
+            error.message
+        );
+        assert!(probe.commands().is_empty());
+
+        let mut probe = halted_at_main();
+        probe.queued.clear();
+        let error = run(&mut probe, |ctx| trace(ctx, 10)).unwrap_err();
+        assert!(
+            error.message.contains("is a trace method set up?"),
+            "{}",
+            error.message
+        );
+
+        let mut probe = halted_at_main();
+        probe.queued.clear();
+        traced(&mut probe);
+        probe.set("STATE.RUN()", Value::Bool(true));
+        let error = run(&mut probe, |ctx| trace(ctx, 10)).unwrap_err();
+        assert!(
+            error.message.contains("the trace still records"),
+            "{}",
+            error.message
+        );
+        assert!(probe.commands().is_empty());
+    }
+
+    #[test]
+    fn fault_lists_the_trace_on_request_and_survives_without_one() {
+        let mut probe = halted_hyp_probe();
+        traced(&mut probe);
+        let outcome = run(&mut probe, |ctx| fault(ctx, Some(3))).unwrap();
+        let text = &outcome.text;
+        assert!(
+            text.contains("\ntrace\n  -3  HT:00001000       -  "),
+            "{text}"
+        );
+        assert_eq!(
+            outcome.json["trace"]["records"].as_array().unwrap().len(),
+            3
+        );
+
+        // Without a trace the report is still given, with the reason.
+        let mut probe = halted_hyp_probe();
+        let outcome = run(&mut probe, |ctx| fault(ctx, Some(3))).unwrap();
+        assert_eq!(outcome.code, 0);
+        assert!(
+            outcome.text.contains("\ntrace\n  unavailable: "),
+            "{}",
+            outcome.text
+        );
+        assert!(
+            outcome.json["trace"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("Trace.RECORDS()")
+        );
+        // Without --trace the JSON has no trace at all.
+        let outcome = run(&mut halted_hyp_probe(), |ctx| fault(ctx, None)).unwrap();
+        assert_eq!(outcome.json.get("trace"), None);
     }
 }

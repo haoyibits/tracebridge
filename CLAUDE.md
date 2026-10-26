@@ -301,6 +301,7 @@ id 回绕：… fe → 00 → 01
 | 8.6 `extra_elf`：多个镜像同一次烧录、加载、核对 | ✅ 单测（命令序列、配置与环境变量、缺文件报错）；0.1.14 发布；rustvisor-sdk 的 S4b、S5 验收一直用它在 SR6P6 上同时烧 EL2 镜像和 Guest | 见 git log |
 | 9 与官方 t32mcp 配合 | ✅ 单测、e2e；0.1.15 发布；2026-10-23 在 SR6P6 上确认 Remote API 只监听本机、PowerView 忙时不动；`skill` 还没在新会话里试过 | 见 git log |
 | 10 rustvisor 需要的通用功能（第一批） | ✅ 单测、CLI 测试；0.1.15 发布；2026-10-23 在 SR6P6 上全部确认（`debug reset`、`debug do`、check 读时钟、HC15 回退） | 见 git log |
+| 11 `debug run-until`、`debug trace`、`fault --trace` | 单测（解析器用 2026-10-22 在 SR6P6 上导出的真实行）；**未发布，未在硬件上试过**（手动验证清单第 21–23 条） | 未提交 |
 
 **debug 的决定**（2026-09-29，任务说明是本地文件 `tracebridge-debug-prompt.md`，里面有项目数据，不提交；用户让我自己定这些点）：
 - 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`。
@@ -384,7 +385,14 @@ id 回绕：… fe → 00 → 01
 - **`debug do <脚本> [参数]`**（S）：`DO` 之后等脚本结束。原因：`debug cmd "DO …"` 在脚本一开始就返回，`irq_latency.sh` 紧接着发 `debug go`，两者的先后顺序没有保证。做法照 t32mcp：先 `ERROR.RESet`；轮询 `PRACTICE.SD()` 和 `T32_GetPracticeState`；连续两次"不在运行"才算停下；停在错误上（`ERROR.OCCURRED()`）就报告 `ERROR.MESSAGE()` 和 `ERROR.CMDLINE()`，用 `END` 结束脚本（最多 50 次，每次等 50 ms），再 `ERROR.RESet`；停在对话框或 `STOP` 上则保持不动，交给用户；超时（默认 `operation_timeout`，可用 `--timeout`）就让它继续跑。相对路径相对当前目录，`~~` 开头的原样传给 TRACE32。`T32_GetPracticeState` 是从 Python 库的 `t32_getpracticestate` 移植的 `t32rcl::Debugger::practice_state`（cmd 0x72、opt 0x03、无负载，应答按小端整数解析），请求字节由 `tools/reference_bytes.py` 用 Python 库生成后写进了单测。
 - **HC15 回退**：`probe::read_long` 读 `C15:` 且 op1 = 4 的寄存器失败（连接没断）时，改用 `HC15:` 再读一次；还失败就报告原来的错误。依据是 Arm 调试器手册（debugger_arm.pdf 的 "Coprocessors" 一节）：带 Hyp 模式的核上，Hyp 专用的 CP15 寄存器可以用 `HC15:` 读，"independent of the current core mode"。手册举的是 Cortex-A7/A15；2026-10-23 在 SR6P6（Cortex-R52）上确认可行：核停在 EL1 时 `C15:0x4011` 报 bus error，`HC15:0x4011` 能读出 HCR，`fault` 也能给出报告。背景：`s4_plan.md` 记录，核停在 EL1 时读 `C15:0x4011` 报 "bus error at address EC15:0x4011"，所以验收只能让 EL2 先把状态写进内存记录。只覆盖 `read_long`（`fault`、check 的 `addr`、时钟寄存器）；`reg` 走 `PER.VALUE`，没有回退。`fault` 读不到时会说明核停在什么模式，不再笼统地说"需要带 Hyp 模式的核"。
 - **`config` 检查行号表**：ELF（包括 `extra_elf`）没有 `.debug_line` 时给 WARN（`debug/elf.rs` 的 `section_names`）。原因：用户问"为什么 List 窗口全是汇编，看不到 Rust 代码"，查下来 rustvisor-sdk 烧录的 release ELF 只有 `.symtab`，没有任何 `.debug_*` 节，因为 `[profile.release]` 没开调试信息。修法在 rustvisor-sdk：`[profile.release] debug = true`（只影响 ELF 文件，不改变烧进去的代码）。tracebridge 只负责提示。
-- **第二批（还没做）**：大块读内存（`debug mem` 最多 4096 个字，而且逐字用 `Data.Long`）、导出 trace（`Trace.EXPORT.Ascii` 解析成 JSON）、版本要求和未知配置项告警（旧版会静默忽略 `extra_elf`，用它烧录会擦掉 Guest）。多核（`--core`、多核 `CORE.ASSIGN`）等 rustvisor S5 的 C、D 段再做。
+- **第二批（还没做）**：大块读内存（`debug mem` 最多 4096 个字，而且逐字用 `Data.Long`）、版本要求和未知配置项告警（旧版会静默忽略 `extra_elf`，用它烧录会擦掉 Guest）。多核（`--core`、多核 `CORE.ASSIGN`）等 rustvisor S5 的 C、D 段再做。
+
+**第 11 阶段：`run-until` 和 trace 导出**（2026-10-26，用户要求"这两个功能做了吧"）。起因是 rustvisor-sdk 的中断延迟第 2 层（`docs/irq_latency_plan.md` §2.10、§9.2、§9.4）：trace 的断点地址每次构建都要从反汇编里重找，导出的 ASCII 每次手工解析。两项都通用，不含板子知识。
+- **`debug run-until <目标> [--timeout 秒]`**（S）：核必须停着；先用 `ADDRESS.OFFSET(<目标>)` 解析出地址（失败就报错，不发 Go），再发 `Go.direct <目标> /Onchip`，每 50 ms 查一次 `STATE.RUN()`。依据 general_ref_g/general_ref_b：`Go.direct <address>` 设临时断点再运行，临时断点在核下次停下时由 TRACE32 自动删除。用 `/Onchip` 是因为 rustvisor 的代码在 flash 上原地运行，软件断点写不进去。目标原样交给 TRACE32（符号、`符号+偏移`、带访问类的地址、`\模块\行`），只有裸的 `0x…` 补成 `P:0x…`（`ADDRESS.OFFSET()` 要地址，不要数）。停下后读 `Register(PP)`：等于目标地址算到达（退出码 0），否则报告停在哪里（带符号），退出码 3（和 check 失败共用，意思都是"目标没有按预期走"）。超时报错，核继续运行，临时断点仍在。没有做多核（`CORE`），等 S5 的 C、D 段。
+- **`debug trace [--last N]`**（R，默认 100）：核必须停着（手册：trace 只在 OFF 或 break 状态下能导出）。先读 `Trace.RECORDS()`，失败时提示"是否设了 trace method"，为 0 时提示先设置并运行；取 `min(N, 记录数)`，执行 `Trace.EXPORT.Ascii "<run_dir>/trace.ad" (-n.)--(-1.) Address CLOCKS.Back CLOCKS.Zero sYmbol List.NoDummy /ShowRecord`。这组列就是 rustvisor-sdk 在板上用过的那一组（`irq_latency_trace.cmm` 的注释），解析器照真实导出的行写：记录号、`访问类:十六进制地址`（没有 `0x`，全是数字时也按十六进制）、至多两个以 `.` 结尾的十进制数（只有一个时是 `CLOCKS.Zero`，第一条记录没有 `CLOCKS.Back`）、被截断的符号（`*` 开头）。符号列不用，按地址用 `symbolize` 重新查（每个地址只查一次）。不以记录号开头的行（默认列会带反汇编行）跳过。导出前先删掉旧文件，免得导出失败时读到上一次的结果；导出文件保留。tracebridge 不设置 trace：汇点、ETM、缓冲区地址是板子知识，留在项目自己的 `.cmm` 里用 `debug do` 运行。
+- **`debug fault --trace [N]`**（默认 32）：报告之后列出最新的 N 条 trace 记录。trace 读不出来时报告照常给出，原因写在 trace 的位置（JSON 里 `trace.error`），退出码仍为 0；连接断开才算错误。不带 `--trace` 时 JSON 里没有 `trace` 键，和以前完全一样。
+- 已知限制（rustvisor-sdk §9.4 在 SR6P6 上看到的）：代码从缓存运行后，周期数可能挂到错误的记录上，单条记录的 `clocks_back` 不可信，多条的总和是对的。这是 ETM 和解码的问题，tracebridge 照原样输出。
+- 测试：`trace.rs` 的解析单测用 SR6P6 上导出的原样行；`commands.rs` 里 FakeProbe 新增 `exports`（命令前缀 → 写到命令里第一个引号路径的内容）来模拟 `Trace.EXPORT.Ascii`。
 
 **发布方案：手写 GitHub Actions，不用 cargo-dist。** 只有 4 个目标，产物就是 tar.gz 和 sha256，安装位置要求 `~/.local/bin`。cargo-dist 会生成它自己的安装器（默认装到 `~/.cargo/bin`），还要引入 dist 配置和每次重新生成的 workflow，收益小于维护成本。Linux 两个 musl 目标都在对应架构的原生 runner 上构建（ubuntu-24.04 / ubuntu-24.04-arm + musl-tools），不需要 cross；macOS 两个目标都在 macos-14 上构建。
 
@@ -417,6 +425,9 @@ id 回绕：… fe → 00 → 01
 18. **`debug reset`**：在 rustvisor-sdk 里，用 `tracebridge debug reset` 替换 `reset_check` 里那 7 条 `debug cmd`，跑 `s5_acceptance.sh reset`，结果应和原来一样（核停在 `0x29FB8100`，复位检查全部通过）。 ✅ 2026-10-23：`debug reset` 后核停在 `0x29FB8100`，复位检查 11/11、2/2 通过，时钟检查 14/14。
 19. **`debug do`**：跑一个正常结束的脚本、一个有错误命令的脚本、一个停在 `DIALOG.YESNO` 的脚本，分别应报告结束、报错并结束脚本、提示去 PowerView 处理。 ✅ 2026-10-23：正常结束、出错（报告错误并结束脚本）、停在 `STOP`（提示去 PowerView 处理）三种情况都对。`DIALOG.YESNO` 没有单独试。
 20. **check 读时钟**：rustvisor-sdk 已迁移，离线回放 58 份以往的时钟 JSON 结论一致。还差在板上跑一次 `s5_acceptance.sh`（或 `s3_acceptance.sh`），时钟检查应和以往记录的结果一致。 ✅ 2026-10-23：`s5_acceptance.sh -y all` 全部 ok（含 reset 和时钟检查）。
+21. **`debug run-until`**：Guest 停在起跑字之前时，`tracebridge debug run-until <Guest 里的函数名>` 应停在该函数入口、退出码 0；目标设为一个不会执行到的函数并用 `--timeout 2`，应报超时、核继续运行，`Break.List` 里能看到临时断点，`debug break` 后它消失；在 EL2 的 IRQ 向量另设一个断点，再 run-until 一个之后才会到的地址，应退出码 3 并报出向量的符号。确认 `/Onchip` 在 flash 地址上被接受。
+22. **`debug trace`**：按 rustvisor-sdk 的 `irq_latency_trace.cmm` 设好 trace、跑完一段后停核，`tracebridge debug trace --last 3000 --json` 的记录数、地址和周期数应与同一时刻 PowerView 里 `Trace.List Address CLOCKS.Back sYmbol` 一致；`.tracebridge/trace.ad` 应和手工导出的格式相同。没有设 trace 时应提示设置 trace method。
+23. **`debug fault --trace`**：在设了 trace 的镜像上触发一个 Hyp 异常，`fault --trace` 的最后几条记录应停在向量表；没有 trace 时报告照常给出，trace 一栏写明原因。
 
 ### 阶段 0：通读和规划 ✅（本文档）
 

@@ -351,7 +351,8 @@ tracebridge debug go
 Both forms take the same commands and print the same output; the session
 just saves reconnecting and retyping the prefix. `--json` prints one JSON
 document per command. Exit codes: 0 ok, 1 error (including register not
-found), 2 usage, 3 a check failed or `verify` found a difference.
+found), 2 usage, 3 a check failed, `verify` found a difference, or
+`run-until` stopped somewhere else.
 
 On a terminal the output is coloured: labels and register names cyan,
 addresses blue, values bold, symbols yellow, BITFLD texts and `ok`/`match`
@@ -382,7 +383,8 @@ t32 [up, halted]> go
 | `status` | R | Debugger mode, run state, power, CPU; when halted, PC with symbol+offset and the decoded CPSR |
 | `reg <name\|address>…` | R | Registers by PER-file name (`HSR`), field (`HSCTLR.C`, also prints the BITFLD choice), full PER path, or raw address (`C15:0x4025`, `AD:0x40000000`) |
 | `mem <address\|symbol> [count]` | R | `count` 32-bit words (default 1) as a hex dump |
-| `fault` | R | AArch32 Hyp fault report: vector slot (also when PC is in a table other than the one HVBAR points at), HSR decoded, HDFAR or HIFAR, ELR_hyp with symbol, SPSR_hyp. Halted outside Hyp mode, the Hyp registers are read with `HC15:` (see below) |
+| `fault` | R | AArch32 Hyp fault report: vector slot (also when PC is in a table other than the one HVBAR points at), HSR decoded, HDFAR or HIFAR, ELR_hyp with symbol, SPSR_hyp. Halted outside Hyp mode, the Hyp registers are read with `HC15:` (see below). `--trace [N]` adds the newest N trace records (default 32), the way into the exception, when a trace is set up |
+| `trace [--last N]` | R | The newest N records (default 100) of the trace PowerView recorded: record number, address, cycles since the previous record, symbol (below) |
 | `eval <expression>` | R | The value of any PRACTICE expression |
 | `verify [elf] [--t32]` | R | Does target memory hold the ELF's loadable content? |
 | `check <file> [--variant V] [--dry-run]` | R | Data-driven acceptance check (below) |
@@ -393,12 +395,31 @@ t32 [up, halted]> go
 | `reset` | S | Reset the chip through the debugger and halt at the reset vector: `SYStem.Down`, `SYStem.RESet`, then `SYStem.CPU`, `SYStem.MemAccess`, `CORE.ASSIGN` from `trace32.toml`, `SYStem.Mode Up` and `SYStem.JtagClock`. Refused while a PRACTICE script is active |
 | `down` | S | `SYStem.Down` |
 | `break`, `go` | S | Halt or resume the core |
+| `run-until [--timeout S] <symbol\|address>` | S | Runs a halted core until it reaches a symbol, `symbol+offset`, an address (`0x28010570` is taken as `P:`) or a source line (`\module\120`), through a temporary on-chip breakpoint (`Go.direct … /Onchip`, so it works in flash). Exit code 3 when the core stops somewhere else (another breakpoint, a fault); after the timeout the core keeps running with the breakpoint still set |
 | `do [--timeout S] <script> [args…]` | S | Runs a PRACTICE script with `DO` and waits until it ends (`cmd "DO …"` returns as soon as the script starts). A script that stops at an error is ended (`END`) and the error reported; one that waits in a dialog or at `STOP` is left for you. Refused while another script is active |
 | `cmd <PRACTICE command>` | S | Runs **any** command, including reset and flash |
 | `help [command]`, `reconnect`, `quit` | | Session commands |
 
 There is no `up` or `flash` in the session; use the top-level `flash` and
 `load` for those.
+
+**Trace.** tracebridge sets up no trace: the trace sink, the ETM and their
+board settings belong in your own PRACTICE script, run with `debug do`.
+`trace` and `fault --trace` only export what `Trace.METHOD` recorded, with
+`Trace.EXPORT.Ascii … Address CLOCKS.Back CLOCKS.Zero sYmbol List.NoDummy
+/ShowRecord` into `.tracebridge/trace.ad` (kept, for a look at the raw
+listing), and name each address's symbol again, because the export cuts long
+symbols. The core must be halted. The cycle column needs cycle-accurate trace
+(`ETM.TImeMode CycleAccurate`) and is `-` for a record without a predecessor.
+Together with `run-until` a measurement script no longer needs breakpoint
+addresses from a disassembly:
+
+```sh
+tracebridge debug break
+tracebridge debug do scripts/trace_setup.cmm
+tracebridge debug run-until batch_done --timeout 30
+tracebridge debug trace --last 3000 --json > trace.json
+```
 
 **Hyp registers while a Guest is halted.** TRACE32 reads a `C15:` register by
 executing the MRC at the core's current exception level, so a Hyp register
@@ -667,6 +688,7 @@ asking. In the project's `.claude/settings.json`:
       "Bash(tracebridge debug fault:*)",
       "Bash(tracebridge debug verify:*)",
       "Bash(tracebridge debug clock:*)",
+      "Bash(tracebridge debug trace:*)",
       "Bash(tracebridge debug check checks/boot.toml)",
       "Bash(tracebridge debug check checks/boot.toml --dry-run)",
       "Bash(tracebridge debug check checks/boot.toml --variant release)"

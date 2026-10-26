@@ -1139,6 +1139,9 @@ pub mod fake {
         pub queued: HashMap<String, VecDeque<Value>>,
         /// Answers of `practice_state`, in order; 0 once they are used up.
         pub practice_states: VecDeque<u64>,
+        /// Commands that write a file, like `Trace.EXPORT.Ascii "<file>" ...`:
+        /// command prefix → content written to the first quoted path.
+        pub exports: HashMap<String, String>,
     }
 
     fn lost() -> t32rcl::Error {
@@ -1222,6 +1225,15 @@ pub mod fake {
                     operation: t32rcl::Operation::Command(command.into()),
                     message: message.clone(),
                 }));
+            }
+            if let Some(content) = self
+                .exports
+                .iter()
+                .find(|(prefix, _)| command.starts_with(prefix.as_str()))
+                .map(|(_, content)| content.clone())
+            {
+                let path = command.split('"').nth(1).expect("a quoted path");
+                std::fs::write(path, content).expect("writable export path");
             }
             // Like TRACE32: loading the default PER file makes the PER
             // functions work.

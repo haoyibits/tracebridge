@@ -223,7 +223,7 @@ tracebridge debug mem my_buffer 8 --json
 tracebridge debug go
 ```
 
-两种用法的命令和输出完全一样，会话只是省去了每次重新连接和输入前缀。`--json` 让每条命令输出一个 JSON 文档。退出码：0 正常；1 出错（包括寄存器找不到）；2 用法错误；3 表示 `check` 有检查项没通过，或者 `verify` 发现内存和 ELF 不一致。
+两种用法的命令和输出完全一样，会话只是省去了每次重新连接和输入前缀。`--json` 让每条命令输出一个 JSON 文档。退出码：0 正常；1 出错（包括寄存器找不到）；2 用法错误；3 表示 `check` 有检查项没通过、`verify` 发现内存和 ELF 不一致，或者 `run-until` 停在了别处。
 
 在终端里输出带颜色：标签和寄存器名是青色，地址蓝色，读到的值加粗，符号黄色，BITFLD 文字和 `ok`/`match` 绿色，`error:`/`FAIL`/`MISMATCH` 和异常原因红色；提示符里 `running` 是绿色，`halted` 是黄色。怎么关闭或强制颜色见[配置](#配置)。
 
@@ -252,7 +252,8 @@ t32 [up, halted]> go
 | `status` | R | 调试器模式、运行状态、供电、CPU；停核时还显示 PC（符号+偏移）和解码后的 CPSR |
 | `reg <名字\|地址>…` | R | 按 PER 文件里的名字（`HSR`）、字段（`HSCTLR.C`，同时显示 BITFLD 的文字含义）、完整 PER 路径或原始地址（`C15:0x4025`、`AD:0x40000000`）读寄存器 |
 | `mem <地址\|符号> [个数]` | R | 以十六进制显示若干个 32 位字，默认 1 个 |
-| `fault` | R | AArch32 Hyp 异常报告：向量槽位（PC 落在 HVBAR 以外的另一张向量表里时也会指出）、解码后的 HSR、HDFAR 或 HIFAR、带符号的 ELR_hyp、SPSR_hyp。HSR 为 0 时显示没有记录到异常。核停在 Hyp 以外的模式时，改用 `HC15:` 读 Hyp 寄存器（见下文） |
+| `fault` | R | AArch32 Hyp 异常报告：向量槽位（PC 落在 HVBAR 以外的另一张向量表里时也会指出）、解码后的 HSR、HDFAR 或 HIFAR、带符号的 ELR_hyp、SPSR_hyp。HSR 为 0 时显示没有记录到异常。核停在 Hyp 以外的模式时，改用 `HC15:` 读 Hyp 寄存器（见下文）。加 `--trace [N]` 时，在报告后面列出最新的 N 条 trace 记录（默认 32），即进入异常之前执行的路径；前提是已经设好 trace |
+| `trace [--last N]` | R | PowerView 记录的 trace 中最新的 N 条（默认 100）：记录号、地址、距上一条的周期数、符号（见下文） |
 | `eval <表达式>` | R | 求任意 PRACTICE 表达式的值 |
 | `verify [elf] [--t32]` | R | 检查目标内存里是不是 ELF 的可加载内容 |
 | `check <文件> [--variant V] [--dry-run]` | R | 按数据文件执行验收检查（见下文） |
@@ -263,11 +264,21 @@ t32 [up, halted]> go
 | `reset` | S | 通过调试器复位芯片，停在复位向量：`SYStem.Down`、`SYStem.RESet`，再按 `trace32.toml` 设置 `SYStem.CPU`、`SYStem.MemAccess`、`CORE.ASSIGN`，然后 `SYStem.Mode Up` 和 `SYStem.JtagClock`。有 PRACTICE 脚本在运行时拒绝执行 |
 | `down` | S | `SYStem.Down` |
 | `break`、`go` | S | 停核、继续运行 |
+| `run-until [--timeout 秒] <符号\|地址>` | S | 让停着的核运行到某个符号、`符号+偏移`、地址（`0x28010570` 按 `P:` 处理）或源码行（`\module\120`）为止。用临时片上断点（`Go.direct … /Onchip`），所以代码在 flash 里也能用。核停在别处（其他断点、异常）时退出码为 3；超时后核继续运行，断点保留 |
 | `do [--timeout 秒] <脚本> [参数…]` | S | 用 `DO` 运行 PRACTICE 脚本，并等它结束（`cmd "DO …"` 在脚本一开始就返回）。脚本停在错误上时会被结束（`END`）并报告错误；停在对话框或 `STOP` 上时保持不动，交给你处理。已有脚本在运行时拒绝执行 |
 | `cmd <PRACTICE 命令>` | S | 执行**任意**命令，包括复位和烧录 |
 | `help [命令]`、`reconnect`、`quit` | | 会话命令 |
 
 会话里没有 `up` 和 `flash`，请用顶层的 `flash`、`load`。
+
+**Trace。** tracebridge 不负责设置 trace：trace 汇点、ETM 以及它们的板级设置写在你自己的 PRACTICE 脚本里，用 `debug do` 运行。`trace` 和 `fault --trace` 只导出 `Trace.METHOD` 已经记录下来的内容，用的是 `Trace.EXPORT.Ascii … Address CLOCKS.Back CLOCKS.Zero sYmbol List.NoDummy /ShowRecord`，写到 `.tracebridge/trace.ad`（保留下来，方便看原始列表）。导出时长符号会被截断，所以每个地址的符号都会重新查一次。核必须停着。周期数一列需要周期精确 trace（`ETM.TImeMode CycleAccurate`），没有前一条记录的那一条显示 `-`。配合 `run-until`，测量脚本就不用再从反汇编里找断点地址：
+
+```sh
+tracebridge debug break
+tracebridge debug do scripts/trace_setup.cmm
+tracebridge debug run-until batch_done --timeout 30
+tracebridge debug trace --last 3000 --json > trace.json
+```
 
 **Guest 停住时读 Hyp 寄存器。** TRACE32 读 `C15:` 寄存器时，是在核当前的异常级别执行 MRC，所以核停在 EL1 时，读 Hyp 寄存器（op1 = 4，比如 HCR `C15:0x4011`）会报 bus error。这时 tracebridge 会改用 `HC15:` 再读一次。Arm 调试器手册说这个访问类别"不管核当前在什么模式"都能读这些寄存器，但举的例子是 Cortex-A7/A15，在 Cortex-R52 上是否可行还没确认。读不出来时报告原来的错误，`fault` 会说明核停在什么模式。
 
@@ -414,6 +425,7 @@ Lauterbach 官方提供了 [t32mcp](https://gitlab.com/lauterbach/t32mcp)（让 
       "Bash(tracebridge debug fault:*)",
       "Bash(tracebridge debug verify:*)",
       "Bash(tracebridge debug clock:*)",
+      "Bash(tracebridge debug trace:*)",
       "Bash(tracebridge debug check checks/boot.toml)",
       "Bash(tracebridge debug check checks/boot.toml --dry-run)",
       "Bash(tracebridge debug check checks/boot.toml --variant release)"
