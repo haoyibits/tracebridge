@@ -301,7 +301,7 @@ id 回绕：… fe → 00 → 01
 | 8.6 `extra_elf`：多个镜像同一次烧录、加载、核对 | ✅ 单测（命令序列、配置与环境变量、缺文件报错）；0.1.14 发布；rustvisor-sdk 的 S4b、S5 验收一直用它在 SR6P6 上同时烧 EL2 镜像和 Guest | 见 git log |
 | 9 与官方 t32mcp 配合 | ✅ 单测、e2e；0.1.15 发布；2026-10-23 在 SR6P6 上确认 Remote API 只监听本机、PowerView 忙时不动；`skill` 还没在新会话里试过 | 见 git log |
 | 10 rustvisor 需要的通用功能（第一批） | ✅ 单测、CLI 测试；0.1.15 发布；2026-10-23 在 SR6P6 上全部确认（`debug reset`、`debug do`、check 读时钟、HC15 回退） | 见 git log |
-| 11 `debug run-until`、`debug trace`、`fault --trace` | 单测（解析器用 2026-10-22 在 SR6P6 上导出的真实行）；**未发布，未在硬件上试过**（手动验证清单第 21–23 条） | 未提交 |
+| 11 `debug run-until`、`debug trace`、`fault --trace` | 单测（解析器用 2026-10-22 在 SR6P6 上导出的真实行）；0.1.16 发布（用户要求先发布再上板）；**还没在硬件上试过**（手动验证清单第 21–23 条） | 见 git log |
 
 **debug 的决定**（2026-09-29，任务说明是本地文件 `tracebridge-debug-prompt.md`，里面有项目数据，不提交；用户让我自己定这些点）：
 - 模块在 `crates/tracebridge/src/debug/`：`probe.rs`（`Probe` trait：fnc/cmd/read_memory，测试用 FakeProbe）、`decode.rs`（模式/CPSR/HSR/向量槽）、`check.rs`、`elf.rs`、`commands.rs`、`repl.rs`。
