@@ -32,7 +32,6 @@ pub struct Style {
 }
 
 impl Style {
-    #[cfg(test)]
     pub const PLAIN: Style = Style { enabled: false };
     #[cfg(test)]
     pub const COLOR: Style = Style { enabled: true };

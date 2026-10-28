@@ -6,6 +6,19 @@ your project except a `trace32.toml`.
 
 *中文：[README.zh-CN.md](README.zh-CN.md)*
 
+tracebridge is the TRACE32 backend of the rustvisor board runner. Its code stays
+generic; capabilities are added for actual runner needs. Build matrices, Guest
+protocols and acceptance policy remain in rustvisor. The CLI remains available
+for interactive use.
+
+Rust consumers use `tracebridge::backend::{Project, Session}`. `Project::load`
+resolves configuration offline; `Session::connect` uses an already running
+PowerView without resetting it. The session shares the existing CLI operations
+for reset, flash/load, verify, checks, clocks and trace. Checks return typed
+reports, while RAM buffers have explicit bulk read/write methods. Ordinary
+register/MMIO reads retain their existing access semantics. There is no automatic
+retry of target operations after an error. See [backend usage](docs/backend.md).
+
 | Command | What it does |
 |---|---|
 | `tracebridge init` | Create a commented `trace32.toml` in the current directory |

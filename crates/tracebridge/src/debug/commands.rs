@@ -781,6 +781,19 @@ fn verify_one(ctx: &mut Context, path: std::path::PathBuf, t32: bool) -> DResult
 
 /// R without `halt`, S with it (it may stop the core).
 pub fn check(ctx: &mut Context, file: &Path, options: &check::Options) -> DResult<Outcome> {
+    let report = check_report(ctx, file, options)?;
+    Ok(Outcome {
+        text: report.human(ctx.style),
+        json: report.to_json(),
+        code: report.exit_code(),
+    })
+}
+
+pub fn check_report(
+    ctx: &mut Context,
+    file: &Path,
+    options: &check::Options,
+) -> DResult<check::Report> {
     let path = resolve_file(ctx.cwd, file);
     let parsed = check::load(&path)?;
     let tree = match parsed.reads_clocks(options.variant.as_deref()) {
@@ -796,12 +809,7 @@ pub fn check(ctx: &mut Context, file: &Path, options: &check::Options) -> DResul
         tree,
         inputs: &inputs,
     });
-    let report = check::run(ctx.probe, ctx.per, &parsed, options, clocks.as_ref())?;
-    Ok(Outcome {
-        text: report.human(ctx.style),
-        json: report.to_json(),
-        code: report.exit_code(),
-    })
+    check::run(ctx.probe, ctx.per, &parsed, options, clocks.as_ref())
 }
 
 // --------------------------------------------------------------- R: clock

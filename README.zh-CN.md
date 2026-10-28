@@ -4,6 +4,10 @@
 
 *English: [README.md](README.md)*
 
+tracebridge 定位为 rustvisor 板级 runner 的 TRACE32 后端：代码保持通用，功能和优先级由实际 runner 需求决定；构建矩阵、Guest 协议和验收政策留在 rustvisor。现有 CLI 继续用于交互调试。
+
+Rust 调用者使用 `tracebridge::backend::{Project, Session}`：配置加载完全离线，会话连接已运行的 PowerView，共用 CLI 的复位、烧录、verify、检查和时钟实现。检查返回结构化报告，普通 RAM 提供明确的批量读取接口；寄存器/MMIO 的访问语义不变。操作失败后不自动重试。见 [库接口说明](docs/backend.md)。
+
 | 命令 | 作用 |
 |---|---|
 | `tracebridge init` | 在当前目录生成带注释的 `trace32.toml` |

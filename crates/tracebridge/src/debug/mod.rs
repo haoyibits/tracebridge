@@ -6,14 +6,14 @@
 //! debugger state (S), or only open a PowerView window (UI); R commands have no
 //! side effects, so an allowlist of them is safe.
 
-mod check;
-mod clock;
+pub(crate) mod check;
+pub(crate) mod clock;
 mod clockhtml;
-mod commands;
+pub(crate) mod commands;
 mod decode;
-mod elf;
+pub(crate) mod elf;
 mod perfile;
-mod probe;
+pub(crate) mod probe;
 mod repl;
 mod trace;
 

@@ -28,7 +28,7 @@ tracebridge 是 rustvisor（实际在用的是 `../rustvisor-sdk`，`../rustviso
 - **做什么由 rustvisor 的实际需要决定**：不为假想的其他用户泛化（不主动支持其他架构的 fault 解码、Windows 等），等真有第二块板或第二个用户再按需扩展。仓库照常开源、Homebrew 照常发布，但不当产品推广。
 - **划界**：
   - 放进 tracebridge：跟 TRACE32 或"项目加 TRACE32"的工作流有关，并且换一块用 TRACE32 的板子不改代码也能用（数据驱动）。
-  - 放进 rustvisor-sdk：rustvisor 自己的约定（诊断记录格式、镜像头检查、延迟统计、验收流程）。验收脚本直接调用 tracebridge，用 `ELF`、`EXTRA_ELF`、`PROGRAM_NAME` 传入这次要烧的镜像。
+  - 放进 rustvisor-sdk：rustvisor 自己的约定（诊断记录格式、镜像头检查、延迟统计、验收流程）。`tools/board-tests` 通过 `tracebridge::backend` 库接口调用后端，不再逐条启动 CLI；明确传入本次 ELF、extra images 和 program。CLI 的环境变量行为继续保留。
   - 交给官方：AI 的通用调试（t32mcp，见第 9 阶段），以后的 IDE 集成看官方进展。
 - **名字不改**（2026-10-22）：曾考虑过 `t32run` 等名字，但决定做两个独立的 runner 之后，带 TRACE32 意味的 tracebridge 仍然合适。
 - **StellarLINK 是另一个独立的 runner**（2026-10-22，用户确认）：rustvisor 以后还要支持 StellarLINK，功能可能没这么全。它不做成 tracebridge 的后端，因为 tracebridge 从协议（t32rcl）、PowerView 启动、PRACTICE 求值、`.cmm` 烧录脚本到 DAP 代理都绑着 TRACE32，而 StellarLINK 很可能是 OpenOCD 加 GDB（SR6P6 上未确认），共用不了这些。能共用的只有分析部分：check 文件引擎、时钟树计算、ELF 比对、RTT 环形缓冲区、HSR 和 fault 解码，以及 check 文件和时钟描述的格式。这部分只需要"读某个地址的 32 位值、读核心寄存器"，等 StellarLINK 真正开工时再抽成共用的库，各自实现读取接口；两个工具的 `debug check`、`verify`、`clock` 保持同样的用法和 JSON。
@@ -385,7 +385,7 @@ id 回绕：… fe → 00 → 01
 - **`debug do <脚本> [参数]`**（S）：`DO` 之后等脚本结束。原因：`debug cmd "DO …"` 在脚本一开始就返回，`irq_latency.sh` 紧接着发 `debug go`，两者的先后顺序没有保证。做法照 t32mcp：先 `ERROR.RESet`；轮询 `PRACTICE.SD()` 和 `T32_GetPracticeState`；连续两次"不在运行"才算停下；停在错误上（`ERROR.OCCURRED()`）就报告 `ERROR.MESSAGE()` 和 `ERROR.CMDLINE()`，用 `END` 结束脚本（最多 50 次，每次等 50 ms），再 `ERROR.RESet`；停在对话框或 `STOP` 上则保持不动，交给用户；超时（默认 `operation_timeout`，可用 `--timeout`）就让它继续跑。相对路径相对当前目录，`~~` 开头的原样传给 TRACE32。`T32_GetPracticeState` 是从 Python 库的 `t32_getpracticestate` 移植的 `t32rcl::Debugger::practice_state`（cmd 0x72、opt 0x03、无负载，应答按小端整数解析），请求字节由 `tools/reference_bytes.py` 用 Python 库生成后写进了单测。
 - **HC15 回退**：`probe::read_long` 读 `C15:` 且 op1 = 4 的寄存器失败（连接没断）时，改用 `HC15:` 再读一次；还失败就报告原来的错误。依据是 Arm 调试器手册（debugger_arm.pdf 的 "Coprocessors" 一节）：带 Hyp 模式的核上，Hyp 专用的 CP15 寄存器可以用 `HC15:` 读，"independent of the current core mode"。手册举的是 Cortex-A7/A15；2026-10-23 在 SR6P6（Cortex-R52）上确认可行：核停在 EL1 时 `C15:0x4011` 报 bus error，`HC15:0x4011` 能读出 HCR，`fault` 也能给出报告。背景：`s4_plan.md` 记录，核停在 EL1 时读 `C15:0x4011` 报 "bus error at address EC15:0x4011"，所以验收只能让 EL2 先把状态写进内存记录。只覆盖 `read_long`（`fault`、check 的 `addr`、时钟寄存器）；`reg` 走 `PER.VALUE`，没有回退。`fault` 读不到时会说明核停在什么模式，不再笼统地说"需要带 Hyp 模式的核"。
 - **`config` 检查行号表**：ELF（包括 `extra_elf`）没有 `.debug_line` 时给 WARN（`debug/elf.rs` 的 `section_names`）。原因：用户问"为什么 List 窗口全是汇编，看不到 Rust 代码"，查下来 rustvisor-sdk 烧录的 release ELF 只有 `.symtab`，没有任何 `.debug_*` 节，因为 `[profile.release]` 没开调试信息。修法在 rustvisor-sdk：`[profile.release] debug = true`（只影响 ELF 文件，不改变烧进去的代码）。tracebridge 只负责提示。
-- **第二批（还没做）**：大块读内存（`debug mem` 最多 4096 个字，而且逐字用 `Data.Long`）、版本要求和未知配置项告警（旧版会静默忽略 `extra_elf`，用它烧录会擦掉 Guest）。多核（`--core`、多核 `CORE.ASSIGN`）等 rustvisor S5 的 C、D 段再做。
+- **第二批**：0.1.17 已为 Rust runner 实现明确的普通 RAM 批量接口（`debug mem` 仍最多 4096 个字，逐字用 `Data.Long`，不改变寄存器/MMIO 语义）；版本要求和未知配置项告警仍待做（旧版会静默忽略 `extra_elf`，用它烧录会擦掉 Guest）。多核（`--core`、多核 `CORE.ASSIGN`）等 rustvisor S5 的 C、D 段再做。
 
 **第 11 阶段：`run-until` 和 trace 导出**（2026-10-26，用户要求"这两个功能做了吧"）。起因是 rustvisor-sdk 的中断延迟第 2 层（`docs/irq_latency_plan.md` §2.10、§9.2、§9.4）：trace 的断点地址每次构建都要从反汇编里重找，导出的 ASCII 每次手工解析。两项都通用，不含板子知识。
 - **`debug run-until <目标> [--timeout 秒]`**（S）：核必须停着；先用 `ADDRESS.OFFSET(<目标>)` 解析出地址（失败就报错，不发 Go），再发 `Go.direct <目标> /Onchip`，每 50 ms 查一次 `STATE.RUN()`。依据 general_ref_g/general_ref_b：`Go.direct <address>` 设临时断点再运行，临时断点在核下次停下时由 TRACE32 自动删除。用 `/Onchip` 是因为 rustvisor 的代码在 flash 上原地运行，软件断点写不进去。目标原样交给 TRACE32（符号、`符号+偏移`、带访问类的地址、`\模块\行`），只有裸的 `0x…` 补成 `P:0x…`（`ADDRESS.OFFSET()` 要地址，不要数）。停下后读 `Register(PP)`：等于目标地址算到达（退出码 0），否则报告停在哪里（带符号），退出码 3（和 check 失败共用，意思都是"目标没有按预期走"）。超时报错，核继续运行，临时断点仍在。没有做多核（`CORE`），等 S5 的 C、D 段。
@@ -482,3 +482,26 @@ id 回绕：… fe → 00 → 01
 - GitHub Actions：在 tag 上构建 aarch64-apple-darwin、x86_64-apple-darwin、x86_64-unknown-linux-musl、aarch64-unknown-linux-musl，产物是 tar.gz 加 sha256。先比较 cargo-dist 和手写 workflow，告诉我你的推荐。
 - install.sh（curl | sh，装到 ~/.local/bin）。
 - README：安装方法、快速开始（init → config → flash → vscode 或 rustrover）、从 Python 版迁移的说明、macOS 从浏览器下载后要处理 quarantine。
+
+## Rust runner backend (2026-10-28)
+
+`src/lib.rs` owns the modules; `src/cli.rs` contains the existing CLI and
+`src/main.rs` delegates to it. Public backend operations are in `src/backend.rs`.
+The runner determines what interface is needed; do not predesign a general SDK,
+workflow engine or debugger-backend plugin system. `Project` loads configuration
+without target access. `Session` connects to an existing PowerView, reuses one
+RCL connection, invalidates PER metadata on mutations and uses the same
+`target::run_sequence`, check and clock implementations as the CLI. Do not
+silently retry flash/reset after a communication failure. `read_ram_words` and
+`write_ram_word` are explicitly for ordinary RAM via AD access, never CP15/MMIO.
+`Project::evidence_inputs` supplies resolved configuration and selected external
+files without embedding proprietary descriptions. Temporary image paths are
+excluded from the configuration identity; the caller keys loadable bytes.
+Host tests use the fake RCL server; no new hardware verification is implied.
+
+Hardware validation (2026-10-28): the sibling rustvisor Rust runner completed 33
+forced image runs, 32 intermediate resets, cache/no-flash checks and five latency
+smoke variants on SR6P6. Bulk/scalar RAM reads matched all 14,076 words. The only
+board-discovered correction was a stale rustvisor diagnostic-PC criterion after
+inlining changed; no board-specific backend code was added. Evidence is in
+`../rustvisor-sdk/target/board-tests/board-validation-20261028/`.
