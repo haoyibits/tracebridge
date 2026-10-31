@@ -6,7 +6,7 @@
 //! (`Debugger`), `_rc/hlinknet.py`, `_rc/_library.py`, `_rc/_address.py`,
 //! `_rc/_symbol.py` and the used parts of `_rc/_memory.py` and
 //! `_rc/_functions.py`. Every request is byte-for-byte what the Python library
-//! sends; see CLAUDE.md for the message inventory.
+//! sends.
 
 #![forbid(unsafe_code)]
 
