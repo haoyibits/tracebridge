@@ -129,8 +129,8 @@ tracebridge 按下面的顺序查找：
 芯片名请填完整型号，也就是 `SYStem.CPU` 用的那个名字，例如 `STM32F407VG`。官方脚本按系列编写，具体型号通过参数 `CPU=<型号>` 传入；不传的话，脚本会退回一个默认型号。所以当选中的脚本支持 `CPU=`、而 `flash.args` 里没有写时，tracebridge 会自动加上 `CPU=<芯片名>`。`DUALPORT=` 等其他参数用脚本自己的默认值，所以 `flash.args` 通常留空。`target.jtag_clock` 由 tracebridge 在脚本执行完后设置。
 
 ```sh
-tracebridge chips SR6P6              # 看会选哪个脚本
-tracebridge flash --chip SR6P6       # 临时指定芯片
+tracebridge chips STM32F407VG        # 看会选哪个脚本
+tracebridge flash --chip STM32F407VG # 临时指定芯片
 tracebridge flash --script <路径>    # 临时指定脚本
 ```
 
