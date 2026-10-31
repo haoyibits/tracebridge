@@ -208,7 +208,7 @@ after the script has run.
 
 ```sh
 tracebridge chips STM32H743ZI        # which script, and related ones
-tracebridge flash --chip SR6P6       # one-off override
+tracebridge flash --chip STM32H743ZI # one-off override
 tracebridge flash --script ~~/demo/arm/flash/stm32h7-qspi.cmm
 ```
 
@@ -219,7 +219,7 @@ exactly like the original:
 
 ```sh
 mkdir -p ~/.config/tracebridge/flash
-cp sr6p6.cmm ~/.config/tracebridge/flash/
+cp my_chip.cmm ~/.config/tracebridge/flash/
 ```
 
 Keep scripts that come with a TRACE32-only license out of public
